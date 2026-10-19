@@ -113,7 +113,7 @@ USED_OPENAI_ADS_PATHS = {
     "/upload",
     "/custom_audiences",
     "/custom_audiences/{custom_audience_id}",
-    "/custom_audiences/upload",
+    "/uploads",
     "/custom_audiences/{custom_audience_id}/archive",
     "/conversions/pixels",
     "/conversions/api_keys",
@@ -131,6 +131,7 @@ def mock_client():
     mock.get = AsyncMock(return_value={"ok": True, "data": []})
     mock.post = AsyncMock(return_value={"ok": True, "id": "created"})
     mock.upload_file = AsyncMock(return_value={"file_id": "file_123"})
+    mock.upload_bytes = AsyncMock(return_value={"file_id": "file_123"})
     mock.post_conversions = AsyncMock(return_value={"ok": True, "received": 1})
     original = core._client
     core._client = mock
@@ -510,6 +511,28 @@ class TestWriteTools:
         image.write_bytes(b"png")
         await upload_creative(file_path=str(image))
         mock_client.upload_file.assert_called_once_with("/upload", str(image))
+
+    @pytest.mark.asyncio
+    async def test_upload_creative_base64_and_purpose(self, mock_client):
+        from openai_ads_mcp.tools_ads import upload_creative
+
+        await upload_creative(file_content_base64="cG5n", filename="hero.png")
+        mock_client.upload_bytes.assert_called_once_with("/upload", "hero.png", b"png")
+        mock_client.upload_bytes.reset_mock()
+        await upload_creative(file_content_base64="cG5n", filename="icon.png", purpose="account_favicon")
+        mock_client.upload_bytes.assert_called_once_with(
+            "/upload", "icon.png", b"png", data={"purpose": "account_favicon"}
+        )
+        mock_client.upload_bytes.reset_mock()
+        for kwargs in (
+            {"file_content_base64": "cG5n"},
+            {"file_content_base64": "not base64!", "filename": "x.png"},
+            {"file_content_base64": "cG5n", "filename": "x.png", "image_url": "https://example.com/x.png"},
+        ):
+            data = json.loads(await upload_creative(**kwargs))
+            assert data["error"] is True
+        mock_client.upload_bytes.assert_not_called()
+        mock_client.post.assert_not_called()
 
 
 class TestHelpers:
@@ -1050,9 +1073,93 @@ class TestAdGroupFields:
         mock_client.post.assert_called_once_with("/ad_groups/ag_1", json={"description": "New notes"})
 
 
+class TestAudienceUpload:
+    @pytest.mark.asyncio
+    async def test_upload_from_base64_uses_uploads_then_custom_audiences(self, mock_client):
+        from openai_ads_mcp.tools_audiences import manage_audience
+
+        await manage_audience(
+            action="upload",
+            name="Past buyers",
+            identifier_type="email_sha256",
+            file_content_base64="YWJjCg==",
+            filename="buyers.csv",
+        )
+        mock_client.upload_bytes.assert_called_once_with(
+            "/uploads", "buyers.csv", b"abc\n", data={"purpose": "custom_audience"}
+        )
+        mock_client.post.assert_called_once_with(
+            "/custom_audiences",
+            json={
+                "name": "Past buyers",
+                "identifier_type": "email_sha256",
+                "file_id": "file_123",
+                "filename": "buyers.csv",
+                "file_size": 4,
+                "mimetype": "text/csv",
+            },
+        )
+
+    @pytest.mark.asyncio
+    async def test_upload_from_path_and_existing_file_id(self, mock_client, tmp_path):
+        from openai_ads_mcp.tools_audiences import manage_audience
+
+        csv = tmp_path / "list.csv"
+        csv.write_text("a@example.com\n")
+        await manage_audience(action="upload", name="From disk", identifier_type="email", file_path=str(csv))
+        mock_client.upload_file.assert_called_once_with("/uploads", str(csv), data={"purpose": "custom_audience"})
+        assert mock_client.post.call_args.kwargs["json"]["file_size"] == csv.stat().st_size
+
+        mock_client.post.reset_mock()
+        mock_client.upload_file.reset_mock()
+        await manage_audience(action="upload", name="Reuse", identifier_type="phone", file_id="file_9")
+        mock_client.upload_file.assert_not_called()
+        mock_client.post.assert_called_once_with(
+            "/custom_audiences",
+            json={"name": "Reuse", "identifier_type": "phone", "file_id": "file_9"},
+        )
+
+    @pytest.mark.asyncio
+    async def test_upload_validation(self, mock_client):
+        from openai_ads_mcp.tools_audiences import manage_audience
+
+        for kwargs in (
+            {"file_id": "file_1"},
+            {"identifier_type": "email"},
+            {"identifier_type": "email", "file_id": "file_1", "file_content_base64": "YWJj", "filename": "a.csv"},
+        ):
+            data = json.loads(await manage_audience(action="upload", name="Broken", **kwargs))
+            assert data["error"] is True
+        mock_client.post.assert_not_called()
+        mock_client.upload_bytes.assert_not_called()
+
+
+class TestClientMultipart:
+    @pytest.mark.asyncio
+    async def test_upload_bytes_sends_file_and_purpose_as_multipart(self):
+        async def handler(request: httpx.Request) -> httpx.Response:
+            assert str(request.url) == "https://ads.test/v1/uploads"
+            assert request.headers["content-type"].startswith("multipart/form-data")
+            body = request.content
+            assert b'name="purpose"' in body and b"custom_audience" in body
+            assert b'name="file"; filename="list.csv"' in body and b"abc" in body
+            return httpx.Response(200, json={"file_id": "file_1"}, request=request)
+
+        client = OpenAIAdsClient("test", base_url="https://ads.test/v1")
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://ads.test/v1")
+        try:
+            data = await client.upload_bytes("/uploads", "list.csv", b"abc", data={"purpose": "custom_audience"})
+        finally:
+            await client.close()
+        assert data == {"file_id": "file_1"}
+
+
 class TestOpenAPIDrift:
     def test_openapi_contains_every_ads_endpoint_used(self):
-        spec_path = _SERVICE_ROOT / "openapi.json"
+        # The fork checks against the current official spec (python/openapi.json from
+        # https://developers.openai.com/ads/openapi.json); the root copy is upstream's older one.
+        spec_path = Path(__file__).resolve().parents[1] / "openapi.json"
         assert spec_path.exists()
         paths = set(json.loads(spec_path.read_text())["paths"])
         missing = USED_OPENAI_ADS_PATHS - paths

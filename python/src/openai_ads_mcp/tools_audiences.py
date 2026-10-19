@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import mimetypes
+from pathlib import Path
+
 from ._core import *
+
+_AUDIENCE_IDENTIFIER_TYPES = {"email", "phone", "email_sha256", "phone_number_sha256", "gaid"}
 
 
 @ads_tool(open_world=True)
@@ -77,6 +82,36 @@ def _members_payload(members: Any) -> tuple[list[dict[str, Any]] | None, str | N
     return out, None
 
 
+async def _upload_audience_file(
+    client: OpenAIAdsClient,
+    file_path: str | None,
+    file_content_base64: str | None,
+    filename: str | None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """POST /uploads (purpose=custom_audience) and return the file fields for POST /custom_audiences."""
+    purpose = {"purpose": "custom_audience"}
+    if file_content_base64:
+        if filename_err := _validate_non_empty("filename", filename, maximum=255):
+            return None, filename_err
+        content, content_err = _decode_base64(file_content_base64, "file_content_base64")
+        if content_err:
+            return None, content_err
+        name = filename.strip()
+        uploaded = await client.upload_bytes("/uploads", name, content, data=purpose)
+        size = len(content)
+    else:
+        path = Path(file_path or "").expanduser()
+        if not path.exists() or not path.is_file():
+            return None, _bad_request("file_path must point to an existing file.")
+        name = path.name
+        size = path.stat().st_size
+        uploaded = await client.upload_file("/uploads", str(path), data=purpose)
+    file_id = uploaded.get("file_id")
+    if not isinstance(file_id, str) or not file_id:
+        return None, _bad_request("POST /uploads did not return a file_id.")
+    return {"file_id": file_id, "filename": name, "file_size": size}, None
+
+
 @ads_tool(writes=True, destructive=True, open_world=True)
 async def manage_audience(
     action: Literal["create", "upload", "archive"],
@@ -85,7 +120,9 @@ async def manage_audience(
     members: Any = None,
     audience_id: str | None = None,
     file_id: str | None = None,
-    identifier_type: Literal["email", "phone", "email_sha256", "phone_number_sha256"] | None = None,
+    file_path: str | None = None,
+    file_content_base64: str | None = None,
+    identifier_type: Literal["email", "phone", "email_sha256", "phone_number_sha256", "gaid"] | None = None,
     filename: str | None = None,
     mimetype: str | None = None,
     file_size: int | None = None,
@@ -94,7 +131,12 @@ async def manage_audience(
 
     Actions:
     - create: requires name and members, where each member has identifier_type and value.
-    - upload: requires name, file_id, filename, mimetype, and file_size.
+    - upload: creates an audience from a customer list file. Requires name,
+      identifier_type, and exactly one of file_id (from an earlier upload),
+      file_path (a file on the MCP server's machine), or file_content_base64
+      with filename. File sources are uploaded to /uploads first, then the
+      audience is created from the returned file_id. mimetype defaults to a
+      guess from the filename, else text/csv.
     - archive: requires audience_id.
     """
     client, client_err = _get_client_or_error()
@@ -114,23 +156,28 @@ async def manage_audience(
         if action == "upload":
             if name_err := _validate_non_empty("name", name, minimum=3, maximum=1000):
                 return name_err
-            for field_name, value in {"file_id": file_id, "filename": filename, "mimetype": mimetype}.items():
-                if field_err := _validate_non_empty(field_name, value):
-                    return field_err
-            if file_size is None or file_size < 1:
+            if identifier_type is None:
+                return _bad_request("identifier_type is required for action='upload'.")
+            if type_err := _validate_option("identifier_type", identifier_type, _AUDIENCE_IDENTIFIER_TYPES):
+                return type_err
+            if sum(bool(value) for value in (file_id, file_path, file_content_base64)) != 1:
+                return _bad_request("Provide exactly one of file_id, file_path, or file_content_base64.")
+            if file_size is not None and file_size < 1:
                 return _bad_request("file_size must be at least 1.")
-            body: dict[str, Any] = {
-                "name": name,
-                "file_id": file_id,
-                "filename": filename,
-                "mimetype": mimetype,
-                "file_size": file_size,
-            }
+            if file_id:
+                file_fields = _optional_params(file_id=file_id, filename=filename, file_size=file_size)
+            else:
+                file_fields, upload_err = await _upload_audience_file(client, file_path, file_content_base64, filename)
+                if upload_err:
+                    return upload_err
+            if mimetype is None and file_fields.get("filename"):
+                mimetype = mimetypes.guess_type(file_fields["filename"])[0] or "text/csv"
+            body: dict[str, Any] = {"name": name, "identifier_type": identifier_type, **file_fields}
+            if mimetype:
+                body["mimetype"] = mimetype
             if description:
                 body["description"] = description
-            if identifier_type:
-                body["identifier_type"] = identifier_type
-            return _ok(await client.post("/custom_audiences/upload", json=body))
+            return _ok(await client.post("/custom_audiences", json=body))
         if action == "archive":
             if audience_err := _validate_non_empty("audience_id", audience_id):
                 return audience_err

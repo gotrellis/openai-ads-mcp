@@ -146,24 +146,46 @@ async def get_ad(ad_id: str) -> str:
 
 
 @ads_tool(writes=True, open_world=True)
-async def upload_creative(image_url: str | None = None, file_path: str | None = None) -> str:
+async def upload_creative(
+    image_url: str | None = None,
+    file_path: str | None = None,
+    file_content_base64: str | None = None,
+    filename: str | None = None,
+    purpose: Literal["account_favicon"] | None = None,
+) -> str:
     """Upload a creative image and receive a file_id.
 
-    Provide exactly one of image_url or file_path. image_url is sent as JSON to
-    /upload. file_path is sent as multipart/form-data from the local machine.
+    Provide exactly one of image_url, file_path, or file_content_base64.
+    image_url is sent as JSON to /upload. file_path (a file on the MCP server's
+    machine) and file_content_base64 (raw image bytes, base64-encoded, with
+    filename such as hero.png) are sent as multipart/form-data. Set
+    purpose='account_favicon' when the image is for update_ad_account_brand.
     """
-    if bool(image_url) == bool(file_path):
-        return _bad_request("Provide exactly one of image_url or file_path.")
+    if sum(bool(value) for value in (image_url, file_path, file_content_base64)) != 1:
+        return _bad_request("Provide exactly one of image_url, file_path, or file_content_base64.")
+    content = None
+    if file_content_base64:
+        if filename_err := _validate_non_empty("filename", filename, maximum=255):
+            return filename_err
+        content, content_err = _decode_base64(file_content_base64, "file_content_base64")
+        if content_err:
+            return content_err
+    upload_kwargs = {"data": {"purpose": purpose}} if purpose else {}
     client, client_err = _get_client_or_error()
     if client_err:
         return client_err
     try:
         if image_url:
-            return _ok(await client.post("/upload", json={"image_url": image_url}))
+            body = {"image_url": image_url}
+            if purpose:
+                body["purpose"] = purpose
+            return _ok(await client.post("/upload", json=body))
+        if content is not None:
+            return _ok(await client.upload_bytes("/upload", filename.strip(), content, **upload_kwargs))
         path = Path(file_path or "").expanduser()
         if not path.exists() or not path.is_file():
             return _bad_request("file_path must point to an existing file.")
-        return _ok(await client.upload_file("/upload", str(path)))
+        return _ok(await client.upload_file("/upload", str(path), **upload_kwargs))
     except OpenAIAdsAPIError as e:
         return _err(e)
 

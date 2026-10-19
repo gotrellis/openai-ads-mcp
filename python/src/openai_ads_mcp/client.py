@@ -69,9 +69,6 @@ class OpenAIAdsClient:
     async def post(self, path: str, json: dict | None = None, idempotency_key: str | None = None) -> dict:
         return await self._request(self._client, "POST", path, json=json, idempotency_key=idempotency_key)
 
-    async def patch(self, path: str, json: dict | None = None) -> dict:
-        return await self._request(self._client, "PATCH", path, json=json)
-
     async def upload_file(self, path: str, file_path: str, data: dict | None = None) -> dict:
         local_path = Path(file_path).expanduser()
         with local_path.open("rb") as handle:

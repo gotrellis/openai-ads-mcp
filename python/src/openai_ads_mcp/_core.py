@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import copy
 import functools
 import hashlib
@@ -412,6 +414,16 @@ def _json_query_list(value: Any, name: str) -> tuple[list[str] | None, str | Non
     return encoded, None
 
 
+def _decode_base64(value: str, name: str) -> tuple[bytes | None, str | None]:
+    try:
+        content = base64.b64decode(value, validate=True)
+    except (binascii.Error, ValueError):
+        return None, _bad_request(f"{name} must be valid base64.")
+    if not content:
+        return None, _bad_request(f"{name} must not be empty.")
+    return content, None
+
+
 def _optional_params(**kwargs: Any) -> dict[str, Any]:
     return {key: value for key, value in kwargs.items() if value is not None}
 
@@ -535,6 +547,7 @@ __all__ = (
     "_coerce_list",
     "_coerce_string_list",
     "_json_query_list",
+    "_decode_base64",
     "_optional_params",
     "_usd_to_micros",
     "_budget_guard",
