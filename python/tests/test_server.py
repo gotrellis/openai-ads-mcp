@@ -28,7 +28,9 @@ FORK_WRITE_TOOLS = {
     "update_ad_account_brand",
     "update_product_feed_products",
 }
-EXPECTED_TOOLS = EXPECTED_TOOLS + sorted(FORK_WRITE_TOOLS)
+# Fork read tools: get_conversions is the read half split out of the upstream manage_conversions.
+FORK_READ_TOOLS = {"get_conversions"}
+EXPECTED_TOOLS = EXPECTED_TOOLS + sorted(FORK_WRITE_TOOLS | FORK_READ_TOOLS)
 
 EXPECTED_WRITE_TOOLS = {
     "create_campaign",
@@ -84,8 +86,7 @@ EXPECTED_OPEN_WORLD_TOOLS = {
     "send_conversions",
     "build_campaign",
     "bulk_ab_test_hints",
-} | FORK_WRITE_TOOLS
-EXPECTED_READONLY_WRITE_TOOLS = {"manage_conversions"}
+} | FORK_WRITE_TOOLS | FORK_READ_TOOLS
 
 USED_OPENAI_ADS_PATHS = {
     "/ad_account",
@@ -152,7 +153,7 @@ class TestToolRegistration:
         assert registered == expected
 
     def test_tool_count_is_curated(self):
-        assert len(self._tools()) == 27 + len(FORK_WRITE_TOOLS)
+        assert len(self._tools()) == 31
 
     def test_all_tools_have_descriptions_and_annotations(self):
         for name, tool in self._tools().items():
@@ -208,9 +209,10 @@ class TestToolRegistration:
         assert "draft_context_hints" in names
         assert "create_campaign" not in names
         assert "send_conversions" not in names
-        assert "manage_conversions" in names
-        assert not (names & (EXPECTED_WRITE_TOOLS - EXPECTED_READONLY_WRITE_TOOLS))
-        assert not (names & FORK_WRITE_TOOLS)
+        assert "get_conversions" in names
+        assert "manage_conversions" not in names
+        assert not (names & EXPECTED_WRITE_TOOLS)
+        assert len(names) == 13
 
 
 class TestReadTools:
@@ -742,8 +744,6 @@ class TestConversions:
         mock_client.post.assert_called_with("/conversions/pixels", json={"name": "Website pixel", "client_type": "web"})
         await manage_conversions(action="create_api_key", name="Server key")
         mock_client.post.assert_called_with("/conversions/api_keys", json={"name": "Server key"})
-        await manage_conversions(action="get_event_settings")
-        mock_client.get.assert_called_with("/conversions/event_settings", params={"limit": 20, "order": "desc"})
         await manage_conversions(
             action="set_event_settings",
             name="Purchase",
@@ -760,20 +760,50 @@ class TestConversions:
                 "source_ids": ["src_1"],
             },
         )
-        await manage_conversions(
+        data = json.loads(await manage_conversions(action="get_insights"))
+        assert data["error"] is True
+
+    @pytest.mark.asyncio
+    async def test_get_conversions_reads(self, mock_client):
+        from openai_ads_mcp.tools_conversions import get_conversions
+
+        await get_conversions(action="get_event_settings")
+        mock_client.get.assert_called_with("/conversions/event_settings", params={"limit": 20, "order": "desc"})
+        date_range = {"type": "date_range", "since": "2026-10-12", "until": "2026-10-19", "timezone": "Asia/Kolkata"}
+        await get_conversions(
             action="get_insights",
             aggregation_level="campaign",
-            time_ranges=["2026-06-01:2026-06-07"],
+            time_ranges=[date_range],
             entity_ids=["camp_1"],
         )
         mock_client.post.assert_called_with(
             "/conversions/insights",
             json={
                 "aggregation_level": "campaign",
-                "time_ranges": ["2026-06-01:2026-06-07"],
+                "time_ranges": [json.dumps(date_range, separators=(",", ":"))],
                 "entity_ids": ["camp_1"],
             },
         )
+        # entity_ids is optional (not required by the spec); a single JSON-string range is accepted.
+        await get_conversions(action="get_insights", aggregation_level="ad", time_ranges=json.dumps(date_range))
+        mock_client.post.assert_called_with(
+            "/conversions/insights",
+            json={"aggregation_level": "ad", "time_ranges": [json.dumps(date_range, separators=(",", ":"))]},
+        )
+
+    @pytest.mark.asyncio
+    async def test_get_conversions_validates_insights_args(self, mock_client):
+        from openai_ads_mcp.tools_conversions import get_conversions
+
+        date_range = {"type": "date_range", "since": "2026-10-12", "until": "2026-10-19", "timezone": "Asia/Kolkata"}
+        for kwargs in (
+            {"aggregation_level": "ad_account", "time_ranges": [date_range]},
+            {"time_ranges": [date_range]},
+            {"aggregation_level": "campaign"},
+        ):
+            data = json.loads(await get_conversions(action="get_insights", **kwargs))
+            assert data["error"] is True, kwargs
+        mock_client.post.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_send_conversions_rejects_too_many(self, mock_client):
@@ -886,15 +916,6 @@ class TestConversions:
         assert data["error"] is True
         assert "custom_event_name" in data["message"]
         mock_client.post_conversions.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_manage_conversions_readonly_blocks_write_actions(self, mock_client, monkeypatch):
-        from openai_ads_mcp.tools_conversions import manage_conversions
-
-        monkeypatch.setenv("OPENAI_ADS_MCP_READONLY", "1")
-        data = json.loads(await manage_conversions(action="create_pixel", name="Blocked pixel"))
-        assert data["error"] is True
-        mock_client.post.assert_not_called()
 
 
 class TestErrorHandling:

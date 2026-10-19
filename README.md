@@ -246,7 +246,7 @@ The production runbook is in `HOSTED_DEPLOY.md`.
 
 ## Tool Surface
 
-The Python and Node runtimes expose the same 27 tools.
+The upstream manifest lists 27 tools. This fork's Python runtime adds `get_conversions`, `set_ad_account_state`, `update_ad_account_brand`, and `update_product_feed_products` (31 total; 13 in readonly mode).
 
 | Group | Tools |
 | --- | --- |
@@ -256,7 +256,7 @@ The Python and Node runtimes expose the same 27 tools.
 | Ads | `list_ads`, `get_ad`, `upload_creative`, `create_ad`, `update_ad`, `set_ad_state` |
 | Insights | `get_insights` |
 | Audiences | `list_audiences`, `get_audience`, `search_geo`, `manage_audience` |
-| Conversions | `manage_conversions`, `send_conversions` |
+| Conversions | `get_conversions` (read), `manage_conversions`, `send_conversions` |
 | Helpers | `build_campaign`, `draft_context_hints`, `bulk_ab_test_hints` |
 
 ### High-use tools
