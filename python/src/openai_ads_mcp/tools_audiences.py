@@ -62,26 +62,6 @@ async def search_geo(query: str) -> str:
         return _err(e)
 
 
-def _members_payload(members: Any) -> tuple[list[dict[str, Any]] | None, str | None]:
-    member_list, err = _coerce_list(members, "members")
-    if err:
-        return None, err
-    if not member_list:
-        return None, _bad_request("members is required for action='create'.")
-    out: list[dict[str, Any]] = []
-    for member in member_list:
-        if not isinstance(member, dict):
-            return None, _bad_request("Each audience member must be an object.")
-        identifier_type = member.get("identifier_type")
-        value = member.get("value")
-        if identifier_type not in {"email", "phone", "email_sha256", "phone_number_sha256"}:
-            return None, _bad_request("member identifier_type must be email, phone, email_sha256, or phone_number_sha256.")
-        if not isinstance(value, str) or not value:
-            return None, _bad_request("Each audience member must include a non-empty value.")
-        out.append({"identifier_type": identifier_type, "value": value})
-    return out, None
-
-
 async def _upload_audience_file(
     client: OpenAIAdsClient,
     file_path: str | None,
@@ -114,10 +94,9 @@ async def _upload_audience_file(
 
 @ads_tool(writes=True, destructive=True, open_world=True)
 async def manage_audience(
-    action: Literal["create", "upload", "archive"],
+    action: Literal["upload", "archive"],
     name: str | None = None,
     description: str | None = None,
-    members: Any = None,
     audience_id: str | None = None,
     file_id: str | None = None,
     file_path: str | None = None,
@@ -127,10 +106,9 @@ async def manage_audience(
     mimetype: str | None = None,
     file_size: int | None = None,
 ) -> str:
-    """Create, upload, or archive a custom audience.
+    """Create a custom audience from a customer list file, or archive one.
 
     Actions:
-    - create: requires name and members, where each member has identifier_type and value.
     - upload: creates an audience from a customer list file. Requires name,
       identifier_type, and exactly one of file_id (from an earlier upload),
       file_path (a file on the MCP server's machine), or file_content_base64
@@ -143,16 +121,6 @@ async def manage_audience(
     if client_err:
         return client_err
     try:
-        if action == "create":
-            if name_err := _validate_non_empty("name", name, minimum=3, maximum=1000):
-                return name_err
-            parsed_members, members_err = _members_payload(members)
-            if members_err:
-                return members_err
-            body = {"name": name, "members": parsed_members}
-            if description:
-                body["description"] = description
-            return _ok(await client.post("/custom_audiences", json=body))
         if action == "upload":
             if name_err := _validate_non_empty("name", name, minimum=3, maximum=1000):
                 return name_err

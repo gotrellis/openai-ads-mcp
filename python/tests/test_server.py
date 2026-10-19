@@ -1290,6 +1290,18 @@ class TestAudienceUpload:
         )
 
     @pytest.mark.asyncio
+    async def test_inline_members_create_is_not_offered(self, mock_client):
+        # POST /custom_audiences rejects members (400 Unknown parameter), so the dead action is gone.
+        from openai_ads_mcp.tools_audiences import manage_audience
+
+        tool = next(t for t in mcp._tool_manager.list_tools() if t.name == "manage_audience")
+        assert "members" not in tool.parameters["properties"]
+        assert "create" not in json.dumps(tool.parameters["properties"]["action"])
+        data = json.loads(await manage_audience(action="create", name="Inline"))
+        assert data["error"] is True
+        mock_client.post.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_upload_validation(self, mock_client):
         from openai_ads_mcp.tools_audiences import manage_audience
 
