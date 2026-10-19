@@ -144,22 +144,22 @@ class TestToolRegistration:
         for name, tool in self._tools().items():
             assert tool.description and len(tool.description) > 20, name
             assert tool.annotations is not None, name
-            assert tool.annotations.readOnlyHint is not None, name
-            assert tool.annotations.destructiveHint is not None, name
-            assert tool.annotations.idempotentHint is not None, name
-            assert tool.annotations.openWorldHint is not None, name
+            assert tool.annotations.read_only_hint is not None, name
+            assert tool.annotations.destructive_hint is not None, name
+            assert tool.annotations.idempotent_hint is not None, name
+            assert tool.annotations.open_world_hint is not None, name
 
     def test_write_annotations_match_expected_set(self):
-        writes = {name for name, tool in self._tools().items() if tool.annotations.readOnlyHint is False}
+        writes = {name for name, tool in self._tools().items() if tool.annotations.read_only_hint is False}
         assert writes == EXPECTED_WRITE_TOOLS
 
     def test_destructive_annotations_match_expected_set(self):
-        destructive = {name for name, tool in self._tools().items() if tool.annotations.destructiveHint is True}
+        destructive = {name for name, tool in self._tools().items() if tool.annotations.destructive_hint is True}
         assert destructive == EXPECTED_DESTRUCTIVE_TOOLS
         assert destructive <= EXPECTED_WRITE_TOOLS
 
     def test_open_world_annotations_match_expected_set(self):
-        open_world = {name for name, tool in self._tools().items() if tool.annotations.openWorldHint is True}
+        open_world = {name for name, tool in self._tools().items() if tool.annotations.open_world_hint is True}
         assert open_world == EXPECTED_OPEN_WORLD_TOOLS
 
     def test_no_structured_output_schema(self):

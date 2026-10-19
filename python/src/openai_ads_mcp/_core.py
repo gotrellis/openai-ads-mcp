@@ -1,4 +1,4 @@
-"""OpenAI Ads MCP Server core helpers and FastMCP setup."""
+"""OpenAI Ads MCP Server core helpers and MCPServer setup."""
 
 from __future__ import annotations
 
@@ -12,10 +12,10 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Literal
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
 
-from .client import API_BASE_URL, OpenAIAdsAPIError, OpenAIAdsClient
+from .client import API_BASE_URL, OpenAIAdsAPIError, OpenAIAdsClient, __version__
 
 _client: OpenAIAdsClient | None = None
 
@@ -60,8 +60,9 @@ async def _lifespan(server):
         _client = None
 
 
-mcp = FastMCP(
+mcp = MCPServer(
     "OpenAI Ads",
+    version=__version__,
     instructions=(
         "Typed MCP tools for OpenAI's Advertiser API. Use get_account first to "
         "confirm the API key works, then read insights before changing spend. "
@@ -254,10 +255,10 @@ def ads_tool(
 ):
     """Register a tool with honest MCP behavior annotations."""
     annotations = ToolAnnotations(
-        readOnlyHint=not writes,
-        destructiveHint=destructive,
-        idempotentHint=(not writes) if idempotent is None else idempotent,
-        openWorldHint=open_world,
+        read_only_hint=not writes,
+        destructive_hint=destructive,
+        idempotent_hint=(not writes) if idempotent is None else idempotent,
+        open_world_hint=open_world,
     )
 
     def decorator(fn):
@@ -265,10 +266,10 @@ def ads_tool(
         readonly_actions = getattr(fn, "_openai_ads_readonly_actions", None)
         readonly_variant = writes and is_readonly_mode() and bool(readonly_actions)
         active_annotations = ToolAnnotations(
-            readOnlyHint=True,
-            destructiveHint=False,
-            idempotentHint=True,
-            openWorldHint=open_world,
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=open_world,
         ) if readonly_variant else annotations
 
         @functools.wraps(fn)
@@ -500,7 +501,7 @@ __all__ = (
     "datetime",
     "timedelta",
     "timezone",
-    "FastMCP",
+    "MCPServer",
     "ToolAnnotations",
     "API_BASE_URL",
     "OpenAIAdsAPIError",
