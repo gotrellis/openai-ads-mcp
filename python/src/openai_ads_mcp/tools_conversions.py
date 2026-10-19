@@ -63,8 +63,9 @@ async def get_conversions(
     Actions:
     - get_event_settings: GET /conversions/event_settings (paged with limit, after, before, order).
     - get_insights: POST /conversions/insights (a read despite the POST). Requires
-      aggregation_level (campaign, ad_group, or ad) and time_ranges. entity_ids is
-      optional; omit it for every entity at that level.
+      aggregation_level (campaign, ad_group, or ad) and time_ranges. Pass
+      entity_ids for per-entity rows; omit it for one total across the account
+      (sent as group_by_entity=false, which the API requires without entity_ids).
 
     time_ranges is a list of range objects (or JSON strings). Prefer a date_range
     in the ad account's timezone (call get_account to read it), for example
@@ -97,6 +98,9 @@ async def get_conversions(
             body: dict[str, Any] = {"aggregation_level": aggregation_level, "time_ranges": ranges}
             if ids:
                 body["entity_ids"] = ids
+            else:
+                # The API defaults group_by_entity to true, then 400s with "entity_ids must be provided".
+                body["group_by_entity"] = False
             return _ok(await client.post("/conversions/insights", json=body))
         return _bad_request(f"Unknown action: {action}")
     except OpenAIAdsAPIError as e:

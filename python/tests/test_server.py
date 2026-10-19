@@ -788,7 +788,11 @@ class TestConversions:
         await get_conversions(action="get_insights", aggregation_level="ad", time_ranges=json.dumps(date_range))
         mock_client.post.assert_called_with(
             "/conversions/insights",
-            json={"aggregation_level": "ad", "time_ranges": [json.dumps(date_range, separators=(",", ":"))]},
+            json={
+                "aggregation_level": "ad",
+                "time_ranges": [json.dumps(date_range, separators=(",", ":"))],
+                "group_by_entity": False,
+            },
         )
 
     @pytest.mark.asyncio
