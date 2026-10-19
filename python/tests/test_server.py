@@ -402,17 +402,26 @@ class TestWriteTools:
         mock_client.post.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_budget_ceiling_is_account_currency_with_legacy_fallback(self, mock_client, monkeypatch):
+    async def test_budget_ceiling_is_account_currency_with_legacy_fallback(self, mock_client, monkeypatch, caplog):
         from openai_ads_mcp.tools_campaigns import create_campaign
 
+        import openai_ads_mcp._core as core
+
+        core._warn_legacy_budget_ceiling.cache_clear()
         monkeypatch.delenv("OPENAI_ADS_BUDGET_CEILING", raising=False)
         monkeypatch.setenv("OPENAI_ADS_BUDGET_CEILING_USD", "1000")
-        await create_campaign(name="INR daily", daily_budget=500)
-        assert mock_client.post.call_args.kwargs["json"]["budget"] == {"daily_spend_limit_micros": 500_000_000}
+        with caplog.at_level("WARNING", logger="openai_ads_mcp"):
+            await create_campaign(name="INR lifetime", lifetime_budget=500)
+            await create_campaign(name="INR lifetime", lifetime_budget=600)
+        assert mock_client.post.call_args.kwargs["json"]["budget"] == {"lifetime_spend_limit_micros": 600_000_000}
+        assert [r.message for r in caplog.records].count(
+            "OPENAI_ADS_BUDGET_CEILING_USD is deprecated: the ceiling is in the ad account's currency, not USD. "
+            "Set OPENAI_ADS_BUDGET_CEILING instead."
+        ) == 1
 
         mock_client.post.reset_mock()
         monkeypatch.setenv("OPENAI_ADS_BUDGET_CEILING", "100")
-        data = json.loads(await create_campaign(name="INR daily", daily_budget=500))
+        data = json.loads(await create_campaign(name="INR lifetime", lifetime_budget=500))
         assert data["error"] is True
         assert "ad account's currency" in data["message"]
         mock_client.post.assert_not_called()
@@ -1112,6 +1121,7 @@ class TestCampaignFields:
         await create_campaign(
             name="Daily test",
             daily_budget=5,
+            confirm_budget=True,
             locations=["geo_us"],
             excluded_locations=["geo_ny"],
             custom_audience_ids=["aud_1"],
@@ -1132,7 +1142,7 @@ class TestCampaignFields:
     async def test_daily_budget_only_and_guards(self, mock_client, monkeypatch):
         from openai_ads_mcp.tools_campaigns import create_campaign, update_campaign
 
-        await create_campaign(name="Daily only", daily_budget=5)
+        await create_campaign(name="Daily only", daily_budget=5, confirm_budget=True)
         assert mock_client.post.call_args.kwargs["json"]["budget"] == {"daily_spend_limit_micros": 5_000_000}
         mock_client.post.reset_mock()
 
@@ -1247,12 +1257,12 @@ class TestAdGroupFields:
         from openai_ads_mcp.tools_adgroups import update_ad_group
 
         # account currency: a ₹500 bid is ordinary on an INR account
-        await update_ad_group(ad_group_id="ag_1", billing_event="click", max_bid=500)
+        await update_ad_group(ad_group_id="ag_1", billing_event="click", max_bid=500, confirm_bid=True)
         body = mock_client.post.call_args.kwargs["json"]
         assert body["bidding_config"]["max_bid_micros"] == 500_000_000
 
         mock_client.post.reset_mock()
-        data = json.loads(await update_ad_group(ad_group_id="ag_1", billing_event="click", max_bid=30_400_001))
+        data = json.loads(await update_ad_group(ad_group_id="ag_1", billing_event="click", max_bid=30_400_001, confirm_bid=True))
         assert data["error"] is True
         mock_client.post.assert_not_called()
 
@@ -1502,3 +1512,113 @@ class TestReviewFixes:
             result = await client.call_tool("get_account", {})
         assert result.is_error is True
         assert "OpenAI Ads API error (HTTP 401): Invalid or expired OPENAI_ADS_API_KEY." in result.content[0].text
+
+    @pytest.mark.asyncio
+    async def test_creates_get_an_idempotency_key_when_none_passed(self, mock_client):
+        import uuid
+
+        from openai_ads_mcp.tools_adgroups import create_ad_group
+        from openai_ads_mcp.tools_ads import create_ad
+        from openai_ads_mcp.tools_campaigns import create_campaign
+
+        await create_campaign(name="Auto key", lifetime_budget=25)
+        await create_ad_group(campaign_id="camp_1", name="Auto", billing_event="click", bidding_strategy="maximize_clicks")
+        await create_ad(ad_group_id="ag_1", name="Auto", creative_type="product_ad_template", title="Title", body="Body")
+        keys = [call.kwargs["idempotency_key"] for call in mock_client.post.call_args_list]
+        assert len(set(keys)) == 3
+        for key in keys:
+            uuid.UUID(key)
+
+    @pytest.mark.asyncio
+    async def test_daily_budget_needs_end_time_within_ceiling(self, mock_client, monkeypatch):
+        from openai_ads_mcp.tools_campaigns import create_campaign
+
+        monkeypatch.setenv("OPENAI_ADS_BUDGET_CEILING", "100")
+        start = 1_900_000_000
+        data = json.loads(await create_campaign(name="Open ended", daily_budget=5))
+        assert data["error"] is True and "no end_time" in data["message"]
+        # 10 days × 5 = 50 <= 100
+        await create_campaign(name="Ten days", daily_budget=5, start_time=start, end_time=start + 10 * 86400)
+        assert mock_client.post.call_args.kwargs["json"]["budget"] == {"daily_spend_limit_micros": 5_000_000}
+        mock_client.post.reset_mock()
+        # 10.5 days rounds up to 11 × 10 = 110 > 100
+        data = json.loads(await create_campaign(
+            name="Too long", daily_budget=10, start_time=start, end_time=start + 10 * 86400 + 43200,
+        ))
+        assert data["error"] is True and "11 days" in data["message"] and "USD" not in data["message"]
+        mock_client.post.assert_not_called()
+        await create_campaign(
+            name="Confirmed", daily_budget=10, start_time=start, end_time=start + 30 * 86400, confirm_budget=True,
+        )
+        mock_client.post.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_bid_ceiling_and_non_finite_amounts(self, mock_client, monkeypatch):
+        from openai_ads_mcp.tools_adgroups import create_ad_group
+        from openai_ads_mcp.tools_campaigns import create_campaign
+
+        monkeypatch.setenv("OPENAI_ADS_BID_CEILING", "10")
+        data = json.loads(await create_ad_group(campaign_id="camp_1", name="Pricey", billing_event="click", max_bid=11))
+        assert data["error"] is True
+        assert "OPENAI_ADS_BID_CEILING" in data["message"] and "confirm_bid=True" in data["message"]
+        assert "USD" not in data["message"]
+        for bad in (float("nan"), float("inf")):
+            data = json.loads(await create_ad_group(campaign_id="camp_1", name="Bad", billing_event="click", max_bid=bad, confirm_bid=True))
+            assert data["error"] is True
+            data = json.loads(await create_campaign(name="Bad budget", lifetime_budget=bad, confirm_budget=True))
+            assert data["error"] is True
+        mock_client.post.assert_not_called()
+        await create_ad_group(campaign_id="camp_1", name="Pricey", billing_event="click", max_bid=11, confirm_bid=True)
+        assert mock_client.post.call_args.kwargs["json"]["bidding_config"]["max_bid_micros"] == 11_000_000
+
+    @pytest.mark.asyncio
+    async def test_update_ad_group_bid_edit_keeps_strategy_and_multipliers(self, mock_client):
+        from openai_ads_mcp.tools_adgroups import update_ad_group
+
+        multipliers = [{"custom_audience_id": "aud_1", "bid_multiplier_micros": 1_500_000}]
+        mock_client.get.return_value = {
+            "id": "ag_1",
+            "bidding_config": {
+                "billing_event_type": "click",
+                "strategy": "maximize_conversions",
+                "max_bid_micros": 3_000_000,
+                "custom_audience_bid_multipliers": multipliers,
+            },
+        }
+        await update_ad_group(ad_group_id="ag_1", max_bid=2)
+        mock_client.get.assert_called_once_with("/ad_groups/ag_1")
+        assert mock_client.post.call_args.kwargs["json"] == {"bidding_config": {
+            "billing_event_type": "click",
+            "strategy": "maximize_conversions",
+            "max_bid_micros": 2_000_000,
+            "custom_audience_bid_multipliers": multipliers,
+        }}
+
+        await update_ad_group(ad_group_id="ag_1", custom_audience_bid_multipliers=[{"custom_audience_id": "aud_2", "bid_multiplier": 2}])
+        assert mock_client.post.call_args.kwargs["json"]["bidding_config"] == {
+            "billing_event_type": "click",
+            "strategy": "maximize_conversions",
+            "max_bid_micros": 3_000_000,
+            "custom_audience_bid_multipliers": [{"custom_audience_id": "aud_2", "bid_multiplier_micros": 2_000_000}],
+        }
+
+        # switching strategy does not inherit the old bid; fixed_bid then needs an explicit one
+        await update_ad_group(ad_group_id="ag_1", bidding_strategy="maximize_clicks")
+        assert "max_bid_micros" not in mock_client.post.call_args.kwargs["json"]["bidding_config"]
+        mock_client.post.reset_mock()
+        data = json.loads(await update_ad_group(ad_group_id="ag_1", bidding_strategy="fixed_bid"))
+        assert data["error"] is True and "fixed_bid requires max_bid" in data["message"]
+        mock_client.post.assert_not_called()
+
+        # AutoBid (automated_bid) is read-only: the strategy is left out so it stays AutoBid
+        mock_client.get.return_value = {"bidding_config": {"billing_event_type": "impression", "strategy": "automated_bid"}}
+        await update_ad_group(ad_group_id="ag_1", custom_audience_bid_multipliers=[])
+        assert mock_client.post.call_args.kwargs["json"]["bidding_config"] == {
+            "billing_event_type": "impression",
+            "custom_audience_bid_multipliers": [],
+        }
+
+        # non-bidding edits do not read first
+        mock_client.get.reset_mock()
+        await update_ad_group(ad_group_id="ag_1", name="Just a rename")
+        mock_client.get.assert_not_called()

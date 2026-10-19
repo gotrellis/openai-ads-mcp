@@ -121,7 +121,7 @@ def _build_campaign_body(
             return None, budget_err
         budget["lifetime_spend_limit_micros"] = _to_micros(float(lifetime_budget))
     if daily_budget is not None:
-        if budget_err := _budget_guard(float(daily_budget), confirm_budget, "daily_budget"):
+        if budget_err := _daily_budget_guard(float(daily_budget), confirm_budget, start_time, end_time):
             return None, budget_err
         budget["daily_spend_limit_micros"] = _to_micros(float(daily_budget))
     if budget:
@@ -246,6 +246,8 @@ async def create_campaign(
     platforms: Any = None,
     confirm_budget: bool = False,
     idempotency_key: str | None = None,
+    budget_usd: float | None = None,
+    daily_budget_usd: float | None = None,
 ) -> str:
     """Create an OpenAI Ads campaign, always safely paused by default.
 
@@ -255,7 +257,8 @@ async def create_campaign(
             (500 = ₹500 on an INR account, $500 on a USD account; call get_account to see the currency).
             Provide this or daily_budget, not both.
         daily_budget: Daily spend limit in the ad account's currency, major units. The API enforces
-            a per-currency minimum (for example ₹500 on INR accounts).
+            a per-currency minimum (for example ₹500 on INR accounts). Needs confirm_budget=True unless
+            end_time is set and daily_budget × days until end_time stays within OPENAI_ADS_BUDGET_CEILING.
         status: Must be paused. To go live, call set_campaign_state after review.
         description: Optional internal campaign description.
         start_time: Optional Unix timestamp, 2000-01-01 to 2100-01-01.
@@ -268,9 +271,13 @@ async def create_campaign(
         custom_audience_ids: Optional custom audience ids to target.
         excluded_custom_audience_ids: Optional custom audience ids to exclude.
         platforms: Optional list of ios_app, android_app, web, desktop_web, ios_web, android_web.
-        confirm_budget: Required when lifetime_budget or daily_budget exceeds OPENAI_ADS_BUDGET_CEILING
-            (account-currency major units, default 100).
+        confirm_budget: Required when lifetime_budget exceeds OPENAI_ADS_BUDGET_CEILING (account-currency
+            major units, default 100), or for a daily_budget that could total more than it (see daily_budget).
+        idempotency_key: Optional; a fresh one is generated when omitted.
+        budget_usd, daily_budget_usd: Removed; use lifetime_budget or daily_budget.
     """
+    if renamed_err := _reject_renamed(budget_usd=budget_usd, daily_budget_usd=daily_budget_usd):
+        return renamed_err
     body, body_err = _build_campaign_body(
         name=name,
         lifetime_budget=lifetime_budget,
@@ -324,12 +331,16 @@ async def update_campaign(
     excluded_custom_audience_ids: Any = None,
     platforms: Any = None,
     confirm_budget: bool = False,
+    budget_usd: float | None = None,
+    daily_budget_usd: float | None = None,
 ) -> str:
     """Update campaign fields.
 
     Budget changes (lifetime_budget or daily_budget, not both, as amounts in the
     ad account's currency, major units; see get_account) are guarded by
-    OPENAI_ADS_BUDGET_CEILING. Activation is not allowed here; use
+    OPENAI_ADS_BUDGET_CEILING: a daily_budget needs confirm_budget=True unless
+    end_time is passed and daily_budget × days until it stays within the
+    ceiling. budget_usd and daily_budget_usd were renamed and are refused. Activation is not allowed here; use
     set_campaign_state after review. bidding_type and mode cannot be changed
     after creation. Targeting arguments match create_campaign.
 
@@ -339,6 +350,8 @@ async def update_campaign(
     """
     if campaign_err := _validate_non_empty("campaign_id", campaign_id):
         return campaign_err
+    if renamed_err := _reject_renamed(budget_usd=budget_usd, daily_budget_usd=daily_budget_usd):
+        return renamed_err
     body, body_err = _build_campaign_body(
         name=name,
         lifetime_budget=lifetime_budget,

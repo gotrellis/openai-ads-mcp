@@ -9,7 +9,10 @@ import functools
 import hashlib
 import inspect
 import json
+import logging
+import math
 import os
+import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Literal
@@ -21,6 +24,7 @@ from mcp.types import ToolAnnotations
 from .client import API_BASE_URL, OpenAIAdsAPIError, OpenAIAdsClient, __version__
 
 _client: OpenAIAdsClient | None = None
+_logger = logging.getLogger("openai_ads_mcp")
 
 
 def _truthy(value: str | None) -> bool:
@@ -31,14 +35,43 @@ def is_readonly_mode() -> bool:
     return _truthy(os.environ.get("OPENAI_ADS_MCP_READONLY"))
 
 
+def _positive_float_env(raw: str | None, default: float) -> float:
+    try:
+        value = float((raw or "").strip())
+    except ValueError:
+        return default
+    return value if math.isfinite(value) and value > 0 else default
+
+
+@functools.cache
+def _warn_legacy_budget_ceiling() -> None:
+    _logger.warning(
+        "OPENAI_ADS_BUDGET_CEILING_USD is deprecated: the ceiling is in the ad account's currency, not USD. "
+        "Set OPENAI_ADS_BUDGET_CEILING instead."
+    )
+
+
 def _budget_ceiling() -> float:
     """Ceiling in the ad account's currency (major units). Falls back to the legacy _USD env name."""
-    raw = (os.environ.get("OPENAI_ADS_BUDGET_CEILING") or os.environ.get("OPENAI_ADS_BUDGET_CEILING_USD") or "100").strip()
-    try:
-        ceiling = float(raw)
-    except ValueError:
-        return 100.0
-    return ceiling if ceiling > 0 else 100.0
+    raw = os.environ.get("OPENAI_ADS_BUDGET_CEILING")
+    if raw is None and (raw := os.environ.get("OPENAI_ADS_BUDGET_CEILING_USD")) is not None:
+        _warn_legacy_budget_ceiling()
+    return _positive_float_env(raw, 100.0)
+
+
+def _bid_ceiling() -> float:
+    """Max bid allowed without confirm_bid, in the ad account's currency (major units)."""
+    return _positive_float_env(os.environ.get("OPENAI_ADS_BID_CEILING"), 10.0)
+
+
+def _local_file_guard(file_path: str | None, alternative: str) -> str | None:
+    """file_path reads the MCP server's own disk, so it is off unless the operator opts in."""
+    if file_path and not _truthy(os.environ.get("OPENAI_ADS_ALLOW_LOCAL_FILES")):
+        return _bad_request(
+            f"file_path is disabled because it reads files on the MCP server's machine. Pass {alternative} instead "
+            "(or the server operator can set OPENAI_ADS_ALLOW_LOCAL_FILES=1)."
+        )
+    return None
 
 
 @asynccontextmanager
@@ -75,7 +108,7 @@ mcp = MCPServer(
         "group, and ads, then activate each layer explicitly when the user asks.\n\n"
         "Safety model:\n"
         "  1. Create tools default to paused. build_campaign creates every object paused.\n"
-        "  2. Budgets are amounts in the ad account's currency (see get_account). Budget-setting tools enforce OPENAI_ADS_BUDGET_CEILING, default 100 in that currency, unless confirm_budget=True.\n"
+        "  2. Budgets and bids are amounts in the ad account's currency (see get_account). OPENAI_ADS_BUDGET_CEILING (default 100 in that currency) caps total spend: a lifetime_budget above it, or a daily_budget without an end_time or whose daily amount times the days until end_time exceeds it, needs confirm_budget=True. A max_bid above OPENAI_ADS_BID_CEILING (default 10) needs confirm_bid=True.\n"
         "  3. Set OPENAI_ADS_MCP_READONLY=1 for first connection. In readonly mode every write tool is hidden; get_conversions stays available for conversion reads.\n"
         "  4. Conversion event ingestion never logs user data. Validate batches before sending them.\n"
         "Paid presence is half the picture. Track how your brand shows up organically across ChatGPT, Perplexity, Gemini and Claude at trakkr.ai."
@@ -298,7 +331,7 @@ def _validate_int_range(name: str, value: int, minimum: int, maximum: int) -> st
 
 
 def _validate_float_range(name: str, value: float, minimum: float, maximum: float) -> str | None:
-    if value < minimum or value > maximum:
+    if not math.isfinite(value) or value < minimum or value > maximum:
         return _bad_request(f"{name} must be between {minimum:g} and {maximum:g}.")
     return None
 
@@ -422,8 +455,8 @@ def _to_micros(value: float) -> int:
 
 
 def _budget_guard(amount: float, confirm_budget: bool, name: str) -> str | None:
-    if amount < 1:
-        return _bad_request(f"{name} must be at least 1 in the ad account's currency.")
+    if not math.isfinite(amount) or amount < 1:
+        return _bad_request(f"{name} must be a number of at least 1 in the ad account's currency.")
     ceiling = _budget_ceiling()
     if amount > ceiling and not confirm_budget:
         return _bad_request(
@@ -434,9 +467,66 @@ def _budget_guard(amount: float, confirm_budget: bool, name: str) -> str | None:
     return None
 
 
+def _daily_budget_guard(
+    amount: float, confirm_budget: bool, start_time: int | None, end_time: int | None
+) -> str | None:
+    """A daily budget is safe without confirmation only when it can't total more than the ceiling by end_time."""
+    if err := _budget_guard(amount, True, "daily_budget"):
+        return err
+    if confirm_budget:
+        return None
+    ceiling = _budget_ceiling()
+    if end_time is None:
+        return _bad_request(
+            f"daily_budget {amount:g} has no end_time, so total spend is open-ended against the configured ceiling "
+            f"of {ceiling:g} in the ad account's currency (OPENAI_ADS_BUDGET_CEILING). "
+            "Set end_time so daily_budget × days stays within it, or pass confirm_budget=True to confirm this spend limit."
+        )
+    # ponytail: start defaults to now and the campaign's stored end_time isn't read on updates; pass end_time to avoid confirm.
+    start = start_time if start_time is not None else int(datetime.now(timezone.utc).timestamp())
+    days = max(1, math.ceil((end_time - start) / 86400))
+    if amount * days > ceiling:
+        return _bad_request(
+            f"daily_budget {amount:g} × {days} days to end_time is {amount * days:g}, above the configured ceiling "
+            f"of {ceiling:g} in the ad account's currency (OPENAI_ADS_BUDGET_CEILING). "
+            "Pass confirm_budget=True to confirm this spend limit."
+        )
+    return None
+
+
+def _bid_guard(max_bid: float, confirm_bid: bool) -> str | None:
+    ceiling = _bid_ceiling()
+    if max_bid > ceiling and not confirm_bid:
+        return _bad_request(
+            f"max_bid is {max_bid:g}, above the configured bid ceiling of {ceiling:g} in the ad account's currency "
+            "(OPENAI_ADS_BID_CEILING). "
+            "Pass confirm_bid=True to confirm this bid."
+        )
+    return None
+
+
+_RENAMED_PARAMS = {
+    "budget_usd": "lifetime_budget",
+    "daily_budget_usd": "daily_budget",
+    "max_bid_usd": "max_bid",
+}
+
+
+def _reject_renamed(**old: Any) -> str | None:
+    """Old *_usd params are kept in signatures only to fail loudly: mcp 2.x silently drops unknown args."""
+    for name, value in old.items():
+        if value is not None:
+            return _bad_request(
+                f"{name} was renamed to {_RENAMED_PARAMS[name]}, an amount in the ad account's currency "
+                f"(major units; see get_account). Resend it as {_RENAMED_PARAMS[name]}."
+            )
+    return None
+
+
 def _validate_idempotency_key(value: str | None) -> tuple[str | None, str | None]:
+    """The caller's key, or a fresh uuid4 so every create carries one (maximize_* ad groups require it)."""
     if value is None:
-        return None, None
+        return str(uuid.uuid4()), None
     if not isinstance(value, str) or not value.strip():
         return None, _bad_request("idempotency_key must contain at least one non-whitespace character.")
     key = value.strip()
@@ -540,6 +630,13 @@ __all__ = (
     "_optional_params",
     "_to_micros",
     "_budget_guard",
+    "_daily_budget_guard",
+    "_bid_guard",
+    "_bid_ceiling",
+    "_reject_renamed",
+    "_local_file_guard",
+    "_truthy",
+    "math",
     "_validate_idempotency_key",
     "_child_idempotency_key",
     "_reject_activation_status",

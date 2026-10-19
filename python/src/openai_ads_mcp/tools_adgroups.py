@@ -9,7 +9,7 @@ _AD_GROUP_STATUSES = {"active", "paused", "archived"}
 _BILLING_EVENTS = {"impression", "click"}
 _BIDDING_STRATEGIES = {"fixed_bid", "maximize_clicks", "maximize_conversions"}
 # The spec's BiddingConfigParams.max_bid_micros maximum (30.4e12 micros), in major units of the account currency.
-# Spend is limited by campaign budgets and their confirm_budget ceiling, not by the bid.
+# The everyday limit is OPENAI_ADS_BID_CEILING (confirm_bid); this is only the API's hard cap.
 _MAX_BID = 30_400_000
 _PRODUCT_SET_FILTER_OPERATORS = {"in", "gt", "gte", "lt", "lte"}
 _PRODUCT_SET_FILTER_FIELDS = {
@@ -102,6 +102,32 @@ def _bid_multipliers_payload(value: Any) -> tuple[list[dict[str, Any]] | None, s
     return out, None
 
 
+def _merge_current_bidding(sent: dict[str, Any], current: Any) -> tuple[dict[str, Any] | None, str | None]:
+    """Fill a partial bidding_config from the ad group's current one: the API replaces it whole."""
+    current = current if isinstance(current, dict) else {}
+    merged = dict(sent)
+    strategy_changed = "strategy" in sent and sent["strategy"] != current.get("strategy")
+    if "billing_event_type" not in merged and current.get("billing_event_type"):
+        merged["billing_event_type"] = current["billing_event_type"]
+    # automated_bid is a read-only strategy; leaving strategy out keeps AutoBid when no bid is sent.
+    if "strategy" not in merged and current.get("strategy") in _BIDDING_STRATEGIES:
+        merged["strategy"] = current["strategy"]
+    # A strategy switch must not inherit the old bid (a fixed bid would become a surprise cap, and back).
+    if "max_bid_micros" not in merged and current.get("max_bid_micros") and not strategy_changed:
+        merged["max_bid_micros"] = current["max_bid_micros"]
+    if "custom_audience_bid_multipliers" not in merged and current.get("custom_audience_bid_multipliers"):
+        merged["custom_audience_bid_multipliers"] = [
+            {"custom_audience_id": m["custom_audience_id"], "bid_multiplier_micros": m["bid_multiplier_micros"]}
+            for m in current["custom_audience_bid_multipliers"]
+            if isinstance(m, dict) and m.get("custom_audience_id") and m.get("bid_multiplier_micros")
+        ]
+    if "billing_event_type" not in merged:
+        return None, _bad_request("billing_event is required: the ad group has no current billing event to keep.")
+    if merged.get("strategy") == "fixed_bid" and "max_bid_micros" not in merged:
+        return None, _bad_request("bidding_strategy fixed_bid requires max_bid.")
+    return merged, None
+
+
 def _build_ad_group_body(
     *,
     campaign_id: str | None = None,
@@ -114,6 +140,7 @@ def _build_ad_group_body(
     custom_audience_bid_multipliers: Any = None,
     context_hints: Any = None,
     product_set: Any = None,
+    confirm_bid: bool = False,
     create: bool = False,
 ) -> tuple[dict[str, Any] | None, str | None]:
     body: dict[str, Any] = {}
@@ -148,22 +175,27 @@ def _build_ad_group_body(
         or bidding_strategy is not None
         or multipliers is not None
     ):
-        # ponytail: max_bid is only optional for maximize_* strategies, so a bid edit never silently falls back to AutoBid.
-        bid_optional = bidding_strategy in {"maximize_clicks", "maximize_conversions"}
-        if billing_event is None or (max_bid is None and not bid_optional):
-            return None, _bad_request(
-                "billing_event and max_bid must be provided together "
-                "(max_bid is optional only with bidding_strategy maximize_clicks or maximize_conversions)."
-            )
-        if billing_event not in _BILLING_EVENTS:
-            return None, _bad_request("billing_event must be impression or click.")
-        bidding_config: dict[str, Any] = {"billing_event_type": billing_event}
+        if create:
+            # ponytail: max_bid is only optional for maximize_* strategies, so a create never silently falls back to AutoBid.
+            bid_optional = bidding_strategy in {"maximize_clicks", "maximize_conversions"}
+            if billing_event is None or (max_bid is None and not bid_optional):
+                return None, _bad_request(
+                    "billing_event and max_bid must be provided together "
+                    "(max_bid is optional only with bidding_strategy maximize_clicks or maximize_conversions)."
+                )
+        bidding_config: dict[str, Any] = {}
+        if billing_event is not None:
+            if billing_event not in _BILLING_EVENTS:
+                return None, _bad_request("billing_event must be impression or click.")
+            bidding_config["billing_event_type"] = billing_event
         if bidding_strategy is not None:
             if strategy_err := _validate_option("bidding_strategy", bidding_strategy, _BIDDING_STRATEGIES):
                 return None, strategy_err
             bidding_config["strategy"] = bidding_strategy
         if max_bid is not None:
             if bid_err := _validate_float_range("max_bid", float(max_bid), 0.000001, _MAX_BID):
+                return None, bid_err
+            if bid_err := _bid_guard(float(max_bid), confirm_bid):
                 return None, bid_err
             bidding_config["max_bid_micros"] = _to_micros(float(max_bid))
         if multipliers is not None:
@@ -244,6 +276,8 @@ async def create_ad_group(
     context_hints: Any = None,
     product_set: Any = None,
     idempotency_key: str | None = None,
+    confirm_bid: bool = False,
+    max_bid_usd: float | None = None,
 ) -> str:
     """Create a paused ad group under a campaign.
 
@@ -260,7 +294,12 @@ async def create_ad_group(
         custom_audience_bid_multipliers: Optional list of {"custom_audience_id": "...", "bid_multiplier": 1.5},
             multiplier between 0.1 and 10.
         context_hints: Optional list of strings that steer matching context.
+        idempotency_key: Optional; a fresh one is generated when omitted (maximize_* strategies require one).
+        confirm_bid: Required when max_bid exceeds OPENAI_ADS_BID_CEILING (account-currency major units, default 10).
+        max_bid_usd: Removed; use max_bid.
     """
+    if renamed_err := _reject_renamed(max_bid_usd=max_bid_usd):
+        return renamed_err
     body, body_err = _build_ad_group_body(
         campaign_id=campaign_id,
         name=name,
@@ -272,6 +311,7 @@ async def create_ad_group(
         custom_audience_bid_multipliers=custom_audience_bid_multipliers,
         context_hints=context_hints,
         product_set=product_set,
+        confirm_bid=confirm_bid,
         create=True,
     )
     if body_err:
@@ -303,16 +343,23 @@ async def update_ad_group(
     custom_audience_bid_multipliers: Any = None,
     context_hints: Any = None,
     product_set: Any = None,
+    confirm_bid: bool = False,
+    max_bid_usd: float | None = None,
 ) -> str:
     """Update ad group fields, including bid and context hints.
 
-    max_bid is in the ad account's currency, major units, like campaign budgets.
-    Any bidding change (max_bid, bidding_strategy, custom_audience_bid_multipliers)
-    sends a full bidding_config, so billing_event is required with it, and
-    max_bid too unless bidding_strategy is maximize_clicks or maximize_conversions.
+    max_bid is in the ad account's currency, major units, like campaign budgets;
+    above OPENAI_ADS_BID_CEILING (default 10) it needs confirm_bid=True. Any
+    bidding change (billing_event, max_bid, bidding_strategy,
+    custom_audience_bid_multipliers) reads the ad group first and resends its
+    current billing event, strategy, bid and multipliers for whatever you leave
+    out, so changing one never resets the others. fixed_bid needs a max_bid.
+    max_bid_usd was renamed to max_bid and is refused.
     """
     if ad_group_err := _validate_non_empty("ad_group_id", ad_group_id):
         return ad_group_err
+    if renamed_err := _reject_renamed(max_bid_usd=max_bid_usd):
+        return renamed_err
     body, body_err = _build_ad_group_body(
         name=name,
         description=description,
@@ -323,6 +370,7 @@ async def update_ad_group(
         custom_audience_bid_multipliers=custom_audience_bid_multipliers,
         context_hints=context_hints,
         product_set=product_set,
+        confirm_bid=confirm_bid,
     )
     if body_err:
         return body_err
@@ -330,6 +378,12 @@ async def update_ad_group(
     if client_err:
         return client_err
     try:
+        if "bidding_config" in body:
+            current = (await client.get(f"/ad_groups/{ad_group_id}")).get("bidding_config")
+            merged, merge_err = _merge_current_bidding(body["bidding_config"], current)
+            if merge_err:
+                return merge_err
+            body["bidding_config"] = merged
         return _ok(await client.post(f"/ad_groups/{ad_group_id}", json=body))
     except OpenAIAdsAPIError as e:
         return _err(e)
