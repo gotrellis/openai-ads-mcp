@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Literal
 
 from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 
 from .client import API_BASE_URL, OpenAIAdsAPIError, OpenAIAdsClient, __version__
@@ -240,7 +241,9 @@ _HARD_ERROR_STATUSES = frozenset({0, 401})
 
 def _err(e: OpenAIAdsAPIError) -> str:
     if e.status_code in _HARD_ERROR_STATUSES or e.status_code >= 500:
-        raise e
+        # ToolError, not the raw exception: mcp 2.x replaces any other exception's message with a
+        # bare "Error executing tool", so callers could not tell a rejected key from an outage.
+        raise ToolError(f"OpenAI Ads API error (HTTP {e.status_code}): {e.detail}") from e
     return json.dumps({"error": True, "message": e.detail}, separators=_COMPACT_SEPARATORS)
 
 

@@ -878,8 +878,10 @@ class TestErrorHandling:
     def test_hard_statuses_raise(self):
         from openai_ads_mcp._core import _err
 
+        from mcp.server.mcpserver.exceptions import ToolError
+
         for status in (0, 401, 500, 503, 504):
-            with pytest.raises(OpenAIAdsAPIError):
+            with pytest.raises(ToolError, match=rf"\(HTTP {status}\): boom {status}"):
                 _err(OpenAIAdsAPIError(status, f"boom {status}"))
 
     @pytest.mark.asyncio
