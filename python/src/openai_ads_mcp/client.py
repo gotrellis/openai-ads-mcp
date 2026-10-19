@@ -26,6 +26,26 @@ _FRIENDLY_ERRORS: dict[int, str] = {
 }
 
 
+_REASON_STATUSES = {403, 404}
+
+
+def _api_reason(response: httpx.Response) -> str | None:
+    """The API's own message/code from an error body, truncated; None when the body has neither."""
+    try:
+        body = response.json()
+    except Exception:
+        return response.text.strip()[:300] or None
+    if not isinstance(body, dict):
+        return str(body)[:300] or None
+    error = body["error"] if isinstance(body.get("error"), dict) else body
+    message = error.get("message") or error.get("detail") or body.get("detail")
+    code = error.get("code")
+    if not message and not code:
+        return None
+    reason = str(message or "")[:300]
+    return f"{reason} (code {code})".strip() if code else reason
+
+
 def _encode_query(params: dict | None) -> dict | None:
     """Send array query params as ``name[]=v``; the API rejects repeated plain ``name=v`` with 400."""
     if not params:
@@ -126,6 +146,8 @@ class OpenAIAdsClient:
             status = exc.response.status_code
             friendly = _FRIENDLY_ERRORS.get(status)
             if friendly:
+                if status in _REASON_STATUSES and not redact_detail and (reason := _api_reason(exc.response)):
+                    friendly = f"{friendly} — API said: {reason}"
                 raise OpenAIAdsAPIError(status, friendly) from exc
             if status >= 500:
                 request_id = exc.response.headers.get("x-request-id")

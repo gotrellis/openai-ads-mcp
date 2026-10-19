@@ -958,6 +958,38 @@ class TestErrorHandling:
         assert excinfo.value.detail == "Invalid or expired OPENAI_ADS_API_KEY."
 
     @pytest.mark.asyncio
+    async def test_client_403_404_keep_api_reason(self):
+        bodies = {
+            "/ad_account": (403, {"error": {"message": "Ads API not enabled for this account", "code": "permission_denied"}}),
+            "/campaigns/cmpn_x": (404, {"message": "Campaign cmpn_x not found"}),
+            "/campaigns/cmpn_long": (404, {"error": {"message": "x" * 500}}),
+            "/campaigns/cmpn_empty": (404, {}),
+        }
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            status, body = bodies[request.url.path.removeprefix("/v1")]
+            return httpx.Response(status, json=body, request=request)
+
+        client = OpenAIAdsClient("test", base_url="https://ads.test/v1")
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://ads.test/v1")
+        details = {}
+        try:
+            for path in bodies:
+                with pytest.raises(OpenAIAdsAPIError) as excinfo:
+                    await client.get(path)
+                details[path] = excinfo.value.detail
+        finally:
+            await client.close()
+        assert details["/ad_account"].startswith("Access denied.")
+        assert details["/ad_account"].endswith(" — API said: Ads API not enabled for this account (code permission_denied)")
+        assert details["/campaigns/cmpn_x"] == (
+            "Resource not found. Check the id and try again. — API said: Campaign cmpn_x not found"
+        )
+        assert details["/campaigns/cmpn_long"].endswith("API said: " + "x" * 300)
+        assert details["/campaigns/cmpn_empty"] == "Resource not found. Check the id and try again."
+
+    @pytest.mark.asyncio
     async def test_client_sends_validate_only_for_conversions(self):
         async def handler(request: httpx.Request) -> httpx.Response:
             assert str(request.url) == "https://bzr.openai.com/v1/events?pid=px_1"
