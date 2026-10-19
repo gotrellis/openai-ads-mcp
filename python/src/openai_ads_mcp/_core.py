@@ -31,8 +31,9 @@ def is_readonly_mode() -> bool:
     return _truthy(os.environ.get("OPENAI_ADS_MCP_READONLY"))
 
 
-def _budget_ceiling_usd() -> float:
-    raw = os.environ.get("OPENAI_ADS_BUDGET_CEILING_USD", "100").strip()
+def _budget_ceiling() -> float:
+    """Ceiling in the ad account's currency (major units). Falls back to the legacy _USD env name."""
+    raw = (os.environ.get("OPENAI_ADS_BUDGET_CEILING") or os.environ.get("OPENAI_ADS_BUDGET_CEILING_USD") or "100").strip()
     try:
         ceiling = float(raw)
     except ValueError:
@@ -74,7 +75,7 @@ mcp = MCPServer(
         "group, and ads, then activate each layer explicitly when the user asks.\n\n"
         "Safety model:\n"
         "  1. Create tools default to paused. build_campaign creates every object paused.\n"
-        "  2. Budget-setting tools enforce OPENAI_ADS_BUDGET_CEILING_USD, default 100 USD, unless confirm_budget=True.\n"
+        "  2. Budgets are amounts in the ad account's currency (see get_account). Budget-setting tools enforce OPENAI_ADS_BUDGET_CEILING, default 100 in that currency, unless confirm_budget=True.\n"
         "  3. Set OPENAI_ADS_MCP_READONLY=1 for first connection. In readonly mode write actions are hidden, while conversion read actions remain available.\n"
         "  4. Conversion event ingestion never logs user data. Validate batches before sending them.\n"
         "Paid presence is half the picture. Track how your brand shows up organically across ChatGPT, Perplexity, Gemini and Claude at trakkr.ai."
@@ -431,17 +432,18 @@ def _optional_params(**kwargs: Any) -> dict[str, Any]:
     return {key: value for key, value in kwargs.items() if value is not None}
 
 
-def _usd_to_micros(value: float) -> int:
+def _to_micros(value: float) -> int:
     return int(round(float(value) * 1_000_000))
 
 
-def _budget_guard(budget_usd: float, confirm_budget: bool, name: str = "budget_usd") -> str | None:
-    if budget_usd < 1:
-        return _bad_request(f"{name} must be at least 1.00 USD.")
-    ceiling = _budget_ceiling_usd()
-    if budget_usd > ceiling and not confirm_budget:
+def _budget_guard(amount: float, confirm_budget: bool, name: str) -> str | None:
+    if amount < 1:
+        return _bad_request(f"{name} must be at least 1 in the ad account's currency.")
+    ceiling = _budget_ceiling()
+    if amount > ceiling and not confirm_budget:
         return _bad_request(
-            f"{name} is {budget_usd:g}, above the configured ceiling of {ceiling:g} USD. "
+            f"{name} is {amount:g}, above the configured ceiling of {ceiling:g} in the ad account's currency "
+            "(OPENAI_ADS_BUDGET_CEILING). "
             "Pass confirm_budget=True to confirm this spend limit."
         )
     return None
@@ -552,12 +554,12 @@ __all__ = (
     "_json_query_list",
     "_decode_base64",
     "_optional_params",
-    "_usd_to_micros",
+    "_to_micros",
     "_budget_guard",
     "_validate_idempotency_key",
     "_child_idempotency_key",
     "_reject_activation_status",
-    "_budget_ceiling_usd",
+    "_budget_ceiling",
     "_validate_unix_time",
     "_extract_id",
     "_now_ms",

@@ -94,7 +94,7 @@ def _bid_multipliers_payload(value: Any) -> tuple[list[dict[str, Any]] | None, s
             return None, range_err
         out.append({
             "custom_audience_id": entry["custom_audience_id"].strip(),
-            "bid_multiplier_micros": _usd_to_micros(float(multiplier)),
+            "bid_multiplier_micros": _to_micros(float(multiplier)),
         })
     return out, None
 
@@ -162,7 +162,7 @@ def _build_ad_group_body(
         if max_bid_usd is not None:
             if bid_err := _validate_float_range("max_bid_usd", float(max_bid_usd), 0.000001, 100):
                 return None, bid_err
-            bidding_config["max_bid_micros"] = _usd_to_micros(float(max_bid_usd))
+            bidding_config["max_bid_micros"] = _to_micros(float(max_bid_usd))
         if multipliers is not None:
             bidding_config["custom_audience_bid_multipliers"] = multipliers
         body["bidding_config"] = bidding_config

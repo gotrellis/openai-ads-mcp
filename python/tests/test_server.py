@@ -377,7 +377,7 @@ class TestWriteTools:
     async def test_create_campaign_happy_path_paused_default(self, mock_client):
         from openai_ads_mcp.tools_campaigns import create_campaign
 
-        await create_campaign(name="Launch test", budget_usd=25, idempotency_key="campaign-create-1")
+        await create_campaign(name="Launch test", lifetime_budget=25, idempotency_key="campaign-create-1")
         mock_client.post.assert_called_once_with(
             "/campaigns",
             json={
@@ -392,17 +392,47 @@ class TestWriteTools:
     async def test_create_campaign_budget_guard(self, mock_client, monkeypatch):
         from openai_ads_mcp.tools_campaigns import create_campaign
 
-        monkeypatch.setenv("OPENAI_ADS_BUDGET_CEILING_USD", "10")
-        data = json.loads(await create_campaign(name="Big test", budget_usd=50))
+        monkeypatch.setenv("OPENAI_ADS_BUDGET_CEILING", "10")
+        data = json.loads(await create_campaign(name="Big test", lifetime_budget=50))
         assert data["error"] is True
         assert "confirm_budget=True" in data["message"]
+        assert "USD" not in data["message"]
+        mock_client.post.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_budget_ceiling_is_account_currency_with_legacy_fallback(self, mock_client, monkeypatch):
+        from openai_ads_mcp.tools_campaigns import create_campaign
+
+        monkeypatch.delenv("OPENAI_ADS_BUDGET_CEILING", raising=False)
+        monkeypatch.setenv("OPENAI_ADS_BUDGET_CEILING_USD", "1000")
+        await create_campaign(name="INR daily", daily_budget=500)
+        assert mock_client.post.call_args.kwargs["json"]["budget"] == {"daily_spend_limit_micros": 500_000_000}
+
+        mock_client.post.reset_mock()
+        monkeypatch.setenv("OPENAI_ADS_BUDGET_CEILING", "100")
+        data = json.loads(await create_campaign(name="INR daily", daily_budget=500))
+        assert data["error"] is True
+        assert "ad account's currency" in data["message"]
+        mock_client.post.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_lifetime_and_daily_budget_are_mutually_exclusive(self, mock_client):
+        from openai_ads_mcp.tools_campaigns import create_campaign, update_campaign
+
+        for call in (
+            create_campaign(name="Both budgets", lifetime_budget=50, daily_budget=5),
+            update_campaign(campaign_id="camp_1", lifetime_budget=50, daily_budget=5, confirm_budget=True),
+        ):
+            data = json.loads(await call)
+            assert data["error"] is True
+            assert "not both" in data["message"]
         mock_client.post.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_create_campaign_rejects_active_status(self, mock_client):
         from openai_ads_mcp.tools_campaigns import create_campaign, update_campaign
 
-        data = json.loads(await create_campaign(name="Launch test", budget_usd=25, status="active"))
+        data = json.loads(await create_campaign(name="Launch test", lifetime_budget=25, status="active"))
         assert data["error"] is True
         mock_client.post.assert_not_called()
         data = json.loads(await update_campaign(campaign_id="camp_1", status="active"))
@@ -415,7 +445,7 @@ class TestWriteTools:
 
         await create_campaign(
             name="Conversion test",
-            budget_usd=25,
+            lifetime_budget=25,
             bidding_type="conversions",
             conversion_event_setting_ids=["event_setting_1"],
         )
@@ -426,7 +456,7 @@ class TestWriteTools:
         mock_client.post.reset_mock()
         data = json.loads(await create_campaign(
             name="Broken conversion test",
-            budget_usd=25,
+            lifetime_budget=25,
             bidding_type="conversions",
         ))
         assert data["error"] is True
@@ -552,7 +582,7 @@ class TestHelpers:
         ])
         result = await build_campaign(
             name="Category test",
-            budget_usd=50,
+            lifetime_budget=50,
             ad_group={"name": "Buyers", "billing_event": "click", "max_bid_usd": 1.5},
             ads=[
                 {
@@ -597,7 +627,7 @@ class TestHelpers:
         ])
         data = json.loads(await build_campaign(
             name="Feed test",
-            budget_usd=50,
+            lifetime_budget=50,
             ad_group={
                 "name": "Feed buyers",
                 "billing_event": "click",
@@ -624,7 +654,7 @@ class TestHelpers:
 
         data = json.loads(await build_campaign(
             name="Conversion tree",
-            budget_usd=50,
+            lifetime_budget=50,
             bidding_type="conversions",
             conversion_event_setting_id="event_setting_1",
             ad_group={"name": "Converters", "billing_event": "impression", "max_bid_usd": 5},
@@ -652,7 +682,7 @@ class TestHelpers:
         ])
         data = json.loads(await build_campaign(
             name="Category test",
-            budget_usd=50,
+            lifetime_budget=50,
             ad_group={"name": "Buyers", "billing_event": "click", "max_bid_usd": 1.5},
             ads=[{
                 "name": "Variant A",
@@ -1024,8 +1054,7 @@ class TestCampaignFields:
 
         await create_campaign(
             name="Daily test",
-            budget_usd=50,
-            daily_budget_usd=5,
+            daily_budget=5,
             locations=["geo_us"],
             excluded_locations=["geo_ny"],
             custom_audience_ids=["aud_1"],
@@ -1033,10 +1062,7 @@ class TestCampaignFields:
             platforms=["web", "ios_app"],
         )
         payload = mock_client.post.call_args.kwargs["json"]
-        assert payload["budget"] == {
-            "lifetime_spend_limit_micros": 50_000_000,
-            "daily_spend_limit_micros": 5_000_000,
-        }
+        assert payload["budget"] == {"daily_spend_limit_micros": 5_000_000}
         assert payload["targeting"] == {
             "locations": {"include": [{"id": "geo_us"}]},
             "excluded_locations": {"include": [{"id": "geo_ny"}]},
@@ -1049,21 +1075,21 @@ class TestCampaignFields:
     async def test_daily_budget_only_and_guards(self, mock_client, monkeypatch):
         from openai_ads_mcp.tools_campaigns import create_campaign, update_campaign
 
-        await create_campaign(name="Daily only", daily_budget_usd=5)
+        await create_campaign(name="Daily only", daily_budget=5)
         assert mock_client.post.call_args.kwargs["json"]["budget"] == {"daily_spend_limit_micros": 5_000_000}
         mock_client.post.reset_mock()
 
         data = json.loads(await create_campaign(name="No budget"))
         assert data["error"] is True
 
-        monkeypatch.setenv("OPENAI_ADS_BUDGET_CEILING_USD", "10")
-        data = json.loads(await update_campaign(campaign_id="camp_1", daily_budget_usd=50))
+        monkeypatch.setenv("OPENAI_ADS_BUDGET_CEILING", "10")
+        data = json.loads(await update_campaign(campaign_id="camp_1", daily_budget=50))
         assert data["error"] is True
-        assert "daily_budget_usd" in data["message"]
+        assert "daily_budget" in data["message"]
         assert "confirm_budget=True" in data["message"]
         mock_client.post.assert_not_called()
 
-        await update_campaign(campaign_id="camp_1", daily_budget_usd=50, confirm_budget=True)
+        await update_campaign(campaign_id="camp_1", daily_budget=50, confirm_budget=True)
         mock_client.post.assert_called_once_with(
             "/campaigns/camp_1",
             json={"budget": {"daily_spend_limit_micros": 50_000_000}},

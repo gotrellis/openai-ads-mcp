@@ -11,7 +11,7 @@ from .tools_campaigns import _build_campaign_body
 @ads_tool(writes=True, destructive=True, open_world=True)
 async def build_campaign(
     name: str,
-    budget_usd: float,
+    lifetime_budget: float,
     ad_group: Any,
     ads: Any,
     bidding_type: Literal["impressions", "clicks", "conversions"] | None = None,
@@ -24,6 +24,10 @@ async def build_campaign(
     Creates one campaign, one ad group, and N ads. Everything is created paused.
     If a step fails, the response includes whatever was created so far plus the
     error so you can clean up or continue deliberately.
+
+    lifetime_budget is the campaign's lifetime spend limit in the ad account's
+    currency, major units (500 = ₹500 or $500; call get_account to see the
+    currency), guarded by OPENAI_ADS_BUDGET_CEILING unless confirm_budget=True.
 
     ad_group must be an object with name, billing_event, and max_bid_usd. It may
     include context_hints. ads must be a list of objects accepted by create_ad:
@@ -48,7 +52,7 @@ async def build_campaign(
         )
     campaign_body, campaign_err = _build_campaign_body(
         name=name,
-        budget_usd=budget_usd,
+        lifetime_budget=lifetime_budget,
         status="paused",
         mode="product_feed" if has_product_set else None,
         bidding_type=bidding_type,

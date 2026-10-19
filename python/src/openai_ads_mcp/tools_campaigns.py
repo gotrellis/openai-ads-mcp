@@ -65,8 +65,8 @@ def _targeting_payload(
 def _build_campaign_body(
     *,
     name: str | None = None,
-    budget_usd: float | None = None,
-    daily_budget_usd: float | None = None,
+    lifetime_budget: float | None = None,
+    daily_budget: float | None = None,
     status: str | None = None,
     description: str | None = None,
     start_time: int | None = None,
@@ -101,19 +101,21 @@ def _build_campaign_body(
     elif create:
         body["status"] = "paused"
 
+    if lifetime_budget is not None and daily_budget is not None:
+        return None, _bad_request("Set lifetime_budget or daily_budget, not both: OpenAI Ads rejects both on one campaign.")
     budget: dict[str, int] = {}
-    if budget_usd is not None:
-        if budget_err := _budget_guard(float(budget_usd), confirm_budget):
+    if lifetime_budget is not None:
+        if budget_err := _budget_guard(float(lifetime_budget), confirm_budget, "lifetime_budget"):
             return None, budget_err
-        budget["lifetime_spend_limit_micros"] = _usd_to_micros(float(budget_usd))
-    if daily_budget_usd is not None:
-        if budget_err := _budget_guard(float(daily_budget_usd), confirm_budget, "daily_budget_usd"):
+        budget["lifetime_spend_limit_micros"] = _to_micros(float(lifetime_budget))
+    if daily_budget is not None:
+        if budget_err := _budget_guard(float(daily_budget), confirm_budget, "daily_budget"):
             return None, budget_err
-        budget["daily_spend_limit_micros"] = _usd_to_micros(float(daily_budget_usd))
+        budget["daily_spend_limit_micros"] = _to_micros(float(daily_budget))
     if budget:
         body["budget"] = budget
     elif create:
-        return None, _bad_request("budget_usd or daily_budget_usd is required.")
+        return None, _bad_request("lifetime_budget or daily_budget is required.")
 
     if description is not None:
         body["description"] = description
@@ -216,8 +218,8 @@ async def get_campaign(campaign_id: str) -> str:
 @ads_tool(writes=True, destructive=True, open_world=True)
 async def create_campaign(
     name: str,
-    budget_usd: float | None = None,
-    daily_budget_usd: float | None = None,
+    lifetime_budget: float | None = None,
+    daily_budget: float | None = None,
     status: Literal["paused"] = "paused",
     description: str | None = None,
     start_time: int | None = None,
@@ -237,8 +239,11 @@ async def create_campaign(
 
     Args:
         name: Campaign name, 3-1000 characters.
-        budget_usd: Lifetime spend limit in USD. Minimum 1.00. Provide this, daily_budget_usd, or both.
-        daily_budget_usd: Daily spend limit in USD. Minimum 1.00.
+        lifetime_budget: Lifetime spend limit in the ad account's currency, major units
+            (500 = ₹500 on an INR account, $500 on a USD account; call get_account to see the currency).
+            Provide this or daily_budget, not both.
+        daily_budget: Daily spend limit in the ad account's currency, major units. The API enforces
+            a per-currency minimum (for example ₹500 on INR accounts).
         status: Must be paused. To go live, call set_campaign_state after review.
         description: Optional internal campaign description.
         start_time: Optional Unix timestamp, 2000-01-01 to 2100-01-01.
@@ -251,12 +256,13 @@ async def create_campaign(
         custom_audience_ids: Optional custom audience ids to target.
         excluded_custom_audience_ids: Optional custom audience ids to exclude.
         platforms: Optional list of ios_app, android_app, web, desktop_web, ios_web, android_web.
-        confirm_budget: Required when budget_usd or daily_budget_usd exceeds OPENAI_ADS_BUDGET_CEILING_USD.
+        confirm_budget: Required when lifetime_budget or daily_budget exceeds OPENAI_ADS_BUDGET_CEILING
+            (account-currency major units, default 100).
     """
     body, body_err = _build_campaign_body(
         name=name,
-        budget_usd=budget_usd,
-        daily_budget_usd=daily_budget_usd,
+        lifetime_budget=lifetime_budget,
+        daily_budget=daily_budget,
         status=status,
         description=description,
         start_time=start_time,
@@ -293,8 +299,8 @@ async def create_campaign(
 async def update_campaign(
     campaign_id: str,
     name: str | None = None,
-    budget_usd: float | None = None,
-    daily_budget_usd: float | None = None,
+    lifetime_budget: float | None = None,
+    daily_budget: float | None = None,
     status: Literal["paused", "archived"] | None = None,
     description: str | None = None,
     start_time: int | None = None,
@@ -309,8 +315,9 @@ async def update_campaign(
 ) -> str:
     """Update campaign fields.
 
-    Budget changes (budget_usd lifetime, daily_budget_usd daily) are guarded by
-    OPENAI_ADS_BUDGET_CEILING_USD. Activation is not allowed here; use
+    Budget changes (lifetime_budget or daily_budget, not both, as amounts in the
+    ad account's currency, major units; see get_account) are guarded by
+    OPENAI_ADS_BUDGET_CEILING. Activation is not allowed here; use
     set_campaign_state after review. bidding_type and mode cannot be changed
     after creation. Targeting arguments match create_campaign.
     """
@@ -318,8 +325,8 @@ async def update_campaign(
         return campaign_err
     body, body_err = _build_campaign_body(
         name=name,
-        budget_usd=budget_usd,
-        daily_budget_usd=daily_budget_usd,
+        lifetime_budget=lifetime_budget,
+        daily_budget=daily_budget,
         status=status,
         description=description,
         start_time=start_time,

@@ -97,7 +97,7 @@ Optional environment variables:
 | `OPENAI_ADS_API_KEY` | Required bearer key for `https://api.ads.openai.com/v1`. |
 | `OPENAI_ADS_API_BASE_URL` | Optional HTTPS override for tests or proxies. |
 | `OPENAI_ADS_MCP_READONLY` | Set to `1` or `true` to register read tools only. |
-| `OPENAI_ADS_BUDGET_CEILING_USD` | Optional budget guard. Default `100`. |
+| `OPENAI_ADS_BUDGET_CEILING` | Optional budget guard, in the ad account's currency (major units). Default `100`. Falls back to the legacy `OPENAI_ADS_BUDGET_CEILING_USD` if set. |
 
 ## Discovery Metadata
 
@@ -298,7 +298,7 @@ This server can affect real ad spend, so the defaults are deliberately cautious.
 
 1. Create tools default to paused. `build_campaign` creates every object paused.
 2. Activations are separate tools: `set_campaign_state`, `set_ad_group_state`, and `set_ad_state`.
-3. Budget-setting paths enforce `OPENAI_ADS_BUDGET_CEILING_USD`, default `100`.
+3. Budgets (`lifetime_budget`, `daily_budget`) are amounts in the ad account's currency, major units (`500` = ₹500 on an INR account, $500 on a USD account; `get_account` shows the currency). Set one or the other, not both. Budget-setting paths enforce `OPENAI_ADS_BUDGET_CEILING`, default `100` in that currency.
 4. To exceed the ceiling, pass `confirm_budget=True`.
 5. `OPENAI_ADS_MCP_READONLY=1` hides every write tool entirely.
 6. Conversion ingest validates at most 1000 events per call, timestamps no older than 7 days, and timestamps no more than 10 minutes in the future.
@@ -330,7 +330,7 @@ Use draft_context_hints for "AI visibility monitoring software" aimed at growth 
 
 Then call build_campaign with:
 - name: "AI visibility category test"
-- budget_usd: 50
+- lifetime_budget: 50 (in the ad account's currency)
 - ad_group: name "Growth teams", billing_event "click", max_bid_usd 1.25, context_hints from the draft
 - ads: two chat_card variants using my uploaded file_id
 
