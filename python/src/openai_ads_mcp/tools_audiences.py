@@ -148,7 +148,15 @@ async def manage_audience(
                 body["mimetype"] = mimetype
             if description:
                 body["description"] = description
-            return _ok(await client.post("/custom_audiences", json=body))
+            try:
+                return _ok(await client.post("/custom_audiences", json=body))
+            except OpenAIAdsAPIError as e:
+                if not file_id:
+                    e.detail = (
+                        f"{e.detail} The file was already uploaded as file_id={file_fields['file_id']}; "
+                        "retry with file_id instead of uploading it again."
+                    )
+                raise
         if action == "archive":
             if audience_err := _validate_non_empty("audience_id", audience_id):
                 return audience_err

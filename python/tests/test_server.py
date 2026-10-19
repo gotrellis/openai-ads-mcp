@@ -1470,7 +1470,6 @@ def real_client():
 
 
 class TestReviewFixes:
-
     @pytest.mark.asyncio
     async def test_path_guard_sends_nothing(self, real_client):
         from openai_ads_mcp.tools_adgroups import update_ad_group
@@ -1521,21 +1520,6 @@ class TestReviewFixes:
 
         response = httpx.Response(404, json={"error": "Ad group not found"})
         assert _api_reason(response) == "Ad group not found"
-
-    @pytest.mark.asyncio
-    async def test_hard_error_text_reaches_an_mcp_client(self, monkeypatch):
-        # Through the real MCPServer request path (in-memory client), not by calling the function.
-        import openai_ads_mcp._core as core
-        from mcp import Client
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(401, json={"message": "bad key"}, request=request)
-
-        monkeypatch.setattr(core, "OpenAIAdsClient", lambda api_key, base_url: _transport_client(handler))
-        async with Client(mcp) as client:
-            result = await client.call_tool("get_account", {})
-        assert result.is_error is True
-        assert "OpenAI Ads API error (HTTP 401): Invalid or expired OPENAI_ADS_API_KEY." in result.content[0].text
 
     @pytest.mark.asyncio
     async def test_creates_get_an_idempotency_key_when_none_passed(self, mock_client):
@@ -1594,6 +1578,29 @@ class TestReviewFixes:
         mock_client.post.assert_not_called()
         await create_ad_group(campaign_id="camp_1", name="Pricey", billing_event="click", max_bid=11, confirm_bid=True)
         assert mock_client.post.call_args.kwargs["json"]["bidding_config"]["max_bid_micros"] == 11_000_000
+
+    @pytest.mark.asyncio
+    async def test_renamed_usd_params_are_refused(self, mock_client):
+        from openai_ads_mcp.helpers import build_campaign
+        from openai_ads_mcp.tools_adgroups import create_ad_group, update_ad_group
+        from openai_ads_mcp.tools_campaigns import create_campaign, update_campaign
+
+        ad = {"creative_type": "product_ad_template", "title": "Title", "body": "Body"}
+        for call, new_name in (
+            (create_campaign(name="Old", budget_usd=25), "lifetime_budget"),
+            (update_campaign(campaign_id="camp_1", daily_budget_usd=25), "daily_budget"),
+            (create_ad_group(campaign_id="camp_1", name="Old", billing_event="click", max_bid_usd=1), "max_bid"),
+            (update_ad_group(ad_group_id="ag_1", max_bid_usd=1), "max_bid"),
+            (build_campaign(name="Old", budget_usd=25, ad_group={}, ads=[ad]), "lifetime_budget"),
+            (build_campaign(name="Old", lifetime_budget=25, ad_group={"name": "G", "billing_event": "click", "max_bid_usd": 1}, ads=[ad]), "max_bid"),
+        ):
+            data = json.loads(await call)
+            assert data["error"] is True
+            assert f"renamed to {new_name}" in data["message"]
+        mock_client.post.assert_not_called()
+        # mcp 2.x drops unknown arguments, so the old names must stay in the schemas to be refused.
+        params = {t.name: t.parameters["properties"] for t in mcp._tool_manager.list_tools()}
+        assert "budget_usd" in params["create_campaign"] and "max_bid_usd" in params["update_ad_group"]
 
     @pytest.mark.asyncio
     async def test_update_ad_group_bid_edit_keeps_strategy_and_multipliers(self, mock_client):
@@ -1667,3 +1674,81 @@ class TestReviewFixes:
             "type": "chat_card", "title": "Old title", "body": "Old body",
             "target_url": "https://trakkr.ai", "file_id": "file_2",
         }}
+
+    @pytest.mark.asyncio
+    async def test_build_campaign_validates_everything_before_posting(self, mock_client, monkeypatch):
+        from openai_ads_mcp.helpers import build_campaign
+
+        good_ad = {"creative_type": "product_ad_template", "title": "Title", "body": "Body"}
+        data = json.loads(await build_campaign(
+            name="Bad ad", lifetime_budget=50,
+            ad_group={"name": "Group", "billing_event": "click", "max_bid": 1},
+            ads=[good_ad, {"creative_type": "chat_card", "title": "No url", "body": "Body"}],
+        ))
+        assert data["error"] is True and data["message"].startswith("ads[1]:")
+        data = json.loads(await build_campaign(
+            name="Bad group", lifetime_budget=50, ad_group={"name": "Group", "billing_event": "click"}, ads=[good_ad],
+        ))
+        assert data["error"] is True
+        mock_client.post.assert_not_called()
+
+        mock_client.post = AsyncMock(side_effect=[{"id": "camp_1"}, {"id": "ag_1"}, {"id": "ad_1"}])
+        await build_campaign(
+            name="Daily tree", daily_budget=500, confirm_budget=True, description="Q4 push",
+            ad_group={
+                "name": "Group", "billing_event": "click", "bidding_strategy": "maximize_clicks",
+                "description": "Buyers", "custom_audience_bid_multipliers": [{"custom_audience_id": "aud_1", "bid_multiplier": 2}],
+            },
+            ads=[good_ad],
+        )
+        campaign, group, ad = (call.kwargs["json"] for call in mock_client.post.call_args_list)
+        assert campaign["budget"] == {"daily_spend_limit_micros": 500_000_000} and campaign["description"] == "Q4 push"
+        assert group["campaign_id"] == "camp_1" and group["description"] == "Buyers"
+        assert group["bidding_config"] == {
+            "billing_event_type": "click",
+            "strategy": "maximize_clicks",
+            "custom_audience_bid_multipliers": [{"custom_audience_id": "aud_1", "bid_multiplier_micros": 2_000_000}],
+        }
+        assert ad["ad_group_id"] == "ag_1"
+        assert all(call.kwargs["idempotency_key"] for call in mock_client.post.call_args_list)
+
+    @pytest.mark.asyncio
+    async def test_audience_create_failure_keeps_uploaded_file_id(self, mock_client):
+        from openai_ads_mcp.tools_audiences import manage_audience
+
+        mock_client.post = AsyncMock(side_effect=OpenAIAdsAPIError(400, "API error (400): bad identifier"))
+        data = json.loads(await manage_audience(
+            action="upload", name="Buyers", identifier_type="email_sha256", file_content_base64="YWJjCg==", filename="b.csv",
+        ))
+        assert data["error"] is True
+        assert "file_id=file_123" in data["message"] and "bad identifier" in data["message"]
+
+    @pytest.mark.asyncio
+    async def test_time_range_shapes(self, mock_client):
+        from openai_ads_mcp.tools_conversions import get_conversions
+        from openai_ads_mcp.tools_insights import get_insights
+
+        date_range = {"type": "date_range", "since": "2026-10-12", "until": "2026-10-19", "timezone": "Asia/Kolkata"}
+        await get_insights(scope="account", time_range=[date_range])
+        assert [json.loads(r) for r in mock_client.get.call_args.kwargs["params"]["time_ranges"]] == [date_range]
+
+        legacy = {"date_range": {k: v for k, v in date_range.items() if k != "type"}}
+        await get_conversions(action="get_insights", aggregation_level="campaign", time_ranges=[legacy])
+        assert [json.loads(r) for r in mock_client.post.call_args.kwargs["json"]["time_ranges"]] == [date_range]
+        data = json.loads(await get_conversions(action="get_insights", aggregation_level="campaign", time_ranges=[{"since": "x"}]))
+        assert data["error"] is True
+
+    @pytest.mark.asyncio
+    async def test_hard_error_text_reaches_an_mcp_client(self, monkeypatch):
+        # Through the real MCPServer request path (in-memory client), not by calling the function.
+        import openai_ads_mcp._core as core
+        from mcp import Client
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(401, json={"message": "bad key"}, request=request)
+
+        monkeypatch.setattr(core, "OpenAIAdsClient", lambda api_key, base_url: _transport_client(handler))
+        async with Client(mcp) as client:
+            result = await client.call_tool("get_account", {})
+        assert result.is_error is True
+        assert "OpenAI Ads API error (HTTP 401): Invalid or expired OPENAI_ADS_API_KEY." in result.content[0].text

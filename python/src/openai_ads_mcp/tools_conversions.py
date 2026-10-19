@@ -6,6 +6,7 @@ import re
 from ipaddress import ip_address
 
 from ._core import *
+from .tools_insights import _normalize_time_range
 
 _ACTION_SOURCES = {"web", "mobile_app", "offline", "physical_store", "phone_call", "email", "other"}
 _CONVERSION_AGGREGATION_LEVELS = {"campaign", "ad_group", "ad"}
@@ -87,11 +88,20 @@ async def get_conversions(
                 return level_err
             if isinstance(time_ranges, dict) or (isinstance(time_ranges, str) and time_ranges.strip().startswith("{")):
                 time_ranges = [time_ranges]
-            ranges, ranges_err = _json_query_list(time_ranges, "time_ranges")
+            items, ranges_err = _coerce_list(time_ranges, "time_ranges")
             if ranges_err:
                 return ranges_err
-            if not ranges:
+            if not items:
                 return _bad_request("time_ranges is required for get_insights.")
+            ranges = []
+            for item in items:
+                time_range, range_err = _coerce_mapping(item, "time_ranges item")
+                if range_err:
+                    return range_err
+                time_range, range_err = _normalize_time_range(time_range)
+                if range_err:
+                    return range_err
+                ranges.append(json.dumps(time_range, separators=_COMPACT_SEPARATORS))
             ids, ids_err = _coerce_string_list(entity_ids, "entity_ids")
             if ids_err:
                 return ids_err

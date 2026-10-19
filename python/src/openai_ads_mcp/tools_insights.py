@@ -54,6 +54,10 @@ def _time_ranges(value: Any) -> tuple[list[str] | None, str | None]:
     value, err = _coerce_json(value, "time_range")
     if err:
         return None, err
+    if isinstance(value, list) and len(value) == 1:
+        value, err = _coerce_json(value[0], "time_range")
+        if err:
+            return None, err
     if not isinstance(value, dict):
         return None, _bad_request("time_range must be one object or JSON object string. Multiple time ranges are not supported.")
     normalized, err = _normalize_time_range(value)
@@ -239,4 +243,4 @@ async def get_insights(
         return _err(e)
 
 
-__all__ = ("get_insights",)
+__all__ = ("get_insights", "_normalize_time_range")
