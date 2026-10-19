@@ -48,30 +48,18 @@ def _normalize_time_range(value: dict[str, Any]) -> tuple[dict[str, Any] | None,
 
 
 def _time_ranges(value: Any) -> tuple[list[str] | None, str | None]:
+    # One range only: the API answers "Multiple time_ranges entries are not yet supported."
     if value is None:
         return None, None
-    if isinstance(value, str):
-        parsed, err = _coerce_json(value, "time_range")
-        if err:
-            return None, err
-        value = parsed
-    items = value if isinstance(value, list) else [value]
-    if not items:
-        return None, _bad_request("time_ranges must include at least one range object.")
-    encoded: list[str] = []
-    for item in items:
-        if isinstance(item, str):
-            parsed, err = _coerce_json(item, "time_range")
-            if err:
-                return None, err
-            item = parsed
-        if not isinstance(item, dict):
-            return None, _bad_request("time_range must be an object or JSON object string.")
-        normalized, err = _normalize_time_range(item)
-        if err:
-            return None, err
-        encoded.append(json.dumps(normalized, separators=_COMPACT_SEPARATORS))
-    return encoded, None
+    value, err = _coerce_json(value, "time_range")
+    if err:
+        return None, err
+    if not isinstance(value, dict):
+        return None, _bad_request("time_range must be one object or JSON object string. Multiple time ranges are not supported.")
+    normalized, err = _normalize_time_range(value)
+    if err:
+        return None, err
+    return [json.dumps(normalized, separators=_COMPACT_SEPARATORS)], None
 
 
 def _validate_filters(value: Any) -> tuple[list[str] | None, str | None]:
@@ -113,7 +101,6 @@ async def get_insights(
     time_granularity: Literal["hourly", "daily", "monthly", "none"] = "daily",
     aggregation_level: Literal["ad_account", "campaign", "ad_group", "ad"] | None = None,
     time_range: Any = None,
-    time_ranges: Any = None,
     segments: Any = None,
     override_segment_group_order: Any = None,
     includes: Any = None,
@@ -132,18 +119,21 @@ async def get_insights(
     conversions when requested by the API.
 
     Use scope='account' for account-wide reporting. For scope='campaign',
-    'ad_group', or 'ad', pass entity_id. time_range is one JSON object,
-    for example {"type":"unix_range","start":1764547200,"end":1765152000}; pass
-    time_ranges instead for a list of such objects to compare periods. filters
-    and sort are lists of JSON objects. segments can be product, country, or
+    'ad_group', or 'ad', pass entity_id. time_range is ONE JSON object; the API
+    does not support multiple ranges per request, so compare periods with
+    separate calls. Prefer a date_range in the ad account's timezone (call
+    get_account to read it), for example
+    {"type":"date_range","since":"2026-10-12","until":"2026-10-19","timezone":"Asia/Kolkata"}.
+    A unix_range ({"type":"unix_range","start":...,"end":...}) must start on a
+    full hour in the account timezone, or the API rejects it. filters and sort
+    are lists of JSON objects. segments can be product, country, or
     device, with at most one segment per request.
 
     Args:
         scope: account, campaign, ad_group, or ad.
         entity_id: Required for non-account scopes.
         time_granularity: hourly, daily, monthly, or none. Default daily.
-        time_range: Optional JSON object for unix_range, hour_range, or date_range.
-        time_ranges: Optional list of time range objects. Use instead of time_range, not with it.
+        time_range: Optional single JSON object for date_range (recommended, account timezone), unix_range, or hour_range.
         segments: Optional segment list: product, country, or device.
         fields: Optional list of fields, such as campaign.id or metadata.readable_time.
         filters: Optional list of JSON filter objects.
@@ -165,9 +155,7 @@ async def get_insights(
     path, path_err = _insights_path(scope, entity_id)
     if path_err:
         return path_err
-    if time_range is not None and time_ranges is not None:
-        return _bad_request("Pass time_range or time_ranges, not both.")
-    time_ranges, time_err = _time_ranges(time_range if time_ranges is None else time_ranges)
+    time_ranges, time_err = _time_ranges(time_range)
     if time_err:
         return time_err
     segment_values, segments_err = _coerce_string_list(segments, "segments")

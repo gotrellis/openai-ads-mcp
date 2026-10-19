@@ -344,22 +344,23 @@ class TestInsights:
         mock_client.get.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_get_insights_multiple_time_ranges(self, mock_client):
+    async def test_get_insights_accepts_one_time_range_only(self, mock_client):
         from openai_ads_mcp.tools_insights import get_insights
 
-        ranges = [
-            {"type": "unix_range", "start": 1764547200, "end": 1765152000},
-            '{"type":"unix_range","start":1765152000,"end":1765756800}',
-        ]
-        await get_insights(scope="account", time_ranges=ranges)
+        await get_insights(scope="account", time_range='{"type":"date_range","since":"2026-10-12","until":"2026-10-19","timezone":"Asia/Kolkata"}')
         params = mock_client.get.call_args.kwargs["params"]
-        assert [json.loads(item)["start"] for item in params["time_ranges"]] == [1764547200, 1765152000]
+        assert [json.loads(item)["since"] for item in params["time_ranges"]] == ["2026-10-12"]
 
         mock_client.get.reset_mock()
-        data = json.loads(await get_insights(scope="account", time_range=ranges[0], time_ranges=ranges))
+        ranges = [
+            {"type": "unix_range", "start": 1764547200, "end": 1765152000},
+            {"type": "unix_range", "start": 1765152000, "end": 1765756800},
+        ]
+        data = json.loads(await get_insights(scope="account", time_range=ranges))
         assert data["error"] is True
-        data = json.loads(await get_insights(scope="account", time_ranges=[]))
-        assert data["error"] is True
+        assert "Multiple time ranges" in data["message"]
+        with pytest.raises(TypeError):
+            await get_insights(scope="account", time_ranges=ranges)
         mock_client.get.assert_not_called()
 
     @pytest.mark.asyncio
@@ -957,7 +958,7 @@ class TestErrorHandling:
         try:
             await get_insights(
                 scope="account",
-                time_range={"type": "date_range", "start": "2026-10-01", "end": "2026-10-07", "timezone": "Asia/Kolkata"},
+                time_range={"type": "date_range", "since": "2026-10-01", "until": "2026-10-07", "timezone": "Asia/Kolkata"},
                 fields=["campaign.id", "metrics.spend"],
                 sort=[{"field": "metrics.spend", "direction": "desc"}],
             )
