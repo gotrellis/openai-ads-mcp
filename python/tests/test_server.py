@@ -1646,3 +1646,24 @@ class TestReviewFixes:
         mock_client.get.reset_mock()
         await update_ad_group(ad_group_id="ag_1", name="Just a rename")
         mock_client.get.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_update_ad_merges_single_creative_field(self, mock_client):
+        from openai_ads_mcp.tools_ads import update_ad
+
+        crop = {"x": 0, "y": 0, "width": 1, "height": 1}
+        mock_client.get.return_value = {"id": "ad_1", "creative": {
+            "type": "chat_card", "title": "Old title", "body": "Old body", "target_url": "https://trakkr.ai",
+            "file_id": "file_1", "image_url": "https://cdn/x.png", "image_crop": crop,
+        }}
+        await update_ad(ad_id="ad_1", title="New title")
+        mock_client.get.assert_called_once_with("/ads/ad_1")
+        mock_client.post.assert_called_once_with("/ads/ad_1", json={"creative": {
+            "type": "chat_card", "title": "New title", "body": "Old body",
+            "target_url": "https://trakkr.ai", "file_id": "file_1", "image_crop": crop,
+        }})
+        await update_ad(ad_id="ad_1", file_id="file_2", name="Renamed")
+        assert mock_client.post.call_args.kwargs["json"] == {"name": "Renamed", "creative": {
+            "type": "chat_card", "title": "Old title", "body": "Old body",
+            "target_url": "https://trakkr.ai", "file_id": "file_2",
+        }}

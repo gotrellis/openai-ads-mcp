@@ -210,6 +210,10 @@ async def create_ad(
 
     chat_card creatives require target_url and file_id. product_ad_template
     creatives use the same title/body fields and may include price.
+    target_url must be on the ad account's own website domain until the
+    account's verification is approved; the API otherwise rejects it with
+    "Account verification must be approved before using a different ad URL".
+    idempotency_key is optional; a fresh one is generated when omitted.
     """
     payload, payload_err = _build_ad_body(
         ad_group_id=ad_group_id,
@@ -252,25 +256,42 @@ async def update_ad(
     price: str | None = None,
     status: Literal["paused", "archived"] | None = None,
 ) -> str:
-    """Update ad name, creative, or status."""
+    """Update ad name, creative, or status.
+
+    Creative fields can be changed one at a time: the ad is read first and the
+    fields you pass are merged into its current creative, which is sent whole.
+    """
     if ad_err := _validate_non_empty("ad_id", ad_id):
         return ad_err
-    payload, payload_err = _build_ad_body(
-        name=name,
-        creative_type=creative_type,
-        title=title,
-        body=body,
-        target_url=target_url,
-        file_id=file_id,
-        price=price,
-        status=status,
+    changes = _optional_params(
+        creative_type=creative_type, title=title, body=body, target_url=target_url, file_id=file_id, price=price
     )
-    if payload_err:
-        return payload_err
+    payload: dict[str, Any] = {}
+    if name is not None or status is not None or not changes:
+        payload, payload_err = _build_ad_body(name=name, status=status)
+        if payload_err:
+            return payload_err
     client, client_err = _get_client_or_error()
     if client_err:
         return client_err
     try:
+        if changes:
+            current = (await client.get(f"/ads/{ad_id}")).get("creative") or {}
+            merged = {
+                "creative_type": current.get("type"),
+                "title": current.get("title"),
+                "body": current.get("body"),
+                "target_url": current.get("target_url"),
+                "file_id": current.get("file_id"),
+                "price": current.get("price"),
+                **changes,
+            }
+            creative, creative_err = _build_creative(**merged)
+            if creative_err:
+                return creative_err
+            if creative["type"] == "chat_card" and current.get("image_crop") and creative["file_id"] == current.get("file_id"):
+                creative["image_crop"] = current["image_crop"]
+            payload["creative"] = creative
         return _ok(await client.post(f"/ads/{ad_id}", json=payload))
     except OpenAIAdsAPIError as e:
         return _err(e)
