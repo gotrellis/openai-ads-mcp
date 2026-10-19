@@ -27,6 +27,18 @@ def _locations_include(locations: Any, name: str) -> tuple[dict[str, Any] | None
     return {"include": include}, None
 
 
+def _geo_params(geo: Any) -> dict[str, Any] | None:
+    """Turn a campaign's returned geo block back into request params (include entries by id)."""
+    if not isinstance(geo, dict):
+        return None
+    out: dict[str, Any] = {}
+    if include := [{"id": e["id"]} for e in geo.get("include") or [] if isinstance(e, dict) and e.get("id")]:
+        out["include"] = include
+    if countries := geo.get("countries"):
+        out["countries"] = countries
+    return out or None
+
+
 def _targeting_payload(
     locations: Any = None,
     excluded_locations: Any = None,
@@ -320,6 +332,10 @@ async def update_campaign(
     OPENAI_ADS_BUDGET_CEILING. Activation is not allowed here; use
     set_campaign_state after review. bidding_type and mode cannot be changed
     after creation. Targeting arguments match create_campaign.
+
+    locations and excluded_locations are replaced as a pair by the API, so when
+    only one is given the campaign is read first and the other keeps its current
+    value. Audience and platform targeting change only when passed.
     """
     if campaign_err := _validate_non_empty("campaign_id", campaign_id):
         return campaign_err
@@ -345,6 +361,12 @@ async def update_campaign(
     if client_err:
         return client_err
     try:
+        if (locations is None) != (excluded_locations is None):
+            # The API rewrites targeting geo as a pair: sending one side alone wipes the other.
+            other = "locations" if locations is None else "excluded_locations"
+            current = ((await client.get(f"/campaigns/{campaign_id}")).get("targeting") or {}).get(other)
+            if current := _geo_params(current):
+                body["targeting"][other] = current
         return _ok(await client.post(f"/campaigns/{campaign_id}", json=body))
     except OpenAIAdsAPIError as e:
         return _err(e)

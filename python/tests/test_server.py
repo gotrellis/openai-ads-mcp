@@ -1128,6 +1128,40 @@ class TestCampaignFields:
         assert data["error"] is True
         mock_client.post.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_partial_geo_update_keeps_the_other_side(self, mock_client):
+        from openai_ads_mcp.tools_campaigns import update_campaign
+
+        mock_client.get.return_value = {
+            "id": "camp_1",
+            "targeting": {
+                "locations": {"include": [{"id": "1000104", "name": "India", "type": "country", "country_code": "IN", "region_code": None}]},
+                "excluded_locations": {"include": [{"id": "2000241", "name": "Maharashtra", "type": "region", "country_code": "IN", "region_code": "MH"}]},
+                "platforms": {"included": ["ios_web"]},
+            },
+        }
+        await update_campaign(campaign_id="camp_1", excluded_locations=["2000237"])
+        mock_client.get.assert_called_once_with("/campaigns/camp_1")
+        assert mock_client.post.call_args.kwargs["json"] == {"targeting": {
+            "excluded_locations": {"include": [{"id": "2000237"}]},
+            "locations": {"include": [{"id": "1000104"}]},
+        }}
+
+        mock_client.get.reset_mock()
+        await update_campaign(campaign_id="camp_1", locations=["1000104"])
+        mock_client.get.assert_called_once_with("/campaigns/camp_1")
+        assert mock_client.post.call_args.kwargs["json"] == {"targeting": {
+            "locations": {"include": [{"id": "1000104"}]},
+            "excluded_locations": {"include": [{"id": "2000241"}]},
+        }}
+
+        mock_client.get.reset_mock()
+        await update_campaign(campaign_id="camp_1", locations=["1000104"], excluded_locations=["2000237"])
+        mock_client.get.assert_not_called()
+        await update_campaign(campaign_id="camp_1", platforms=["web"])
+        mock_client.get.assert_not_called()
+        assert mock_client.post.call_args.kwargs["json"] == {"targeting": {"platforms": {"included": ["web"]}}}
+
 
 class TestAdGroupFields:
     @pytest.mark.asyncio
