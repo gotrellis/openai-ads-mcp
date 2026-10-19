@@ -22,6 +22,12 @@ from openai_ads_mcp.client import OpenAIAdsAPIError, OpenAIAdsClient  # noqa: E4
 _SERVICE_ROOT = Path(__file__).resolve().parents[2]
 _MANIFEST_PATH = _SERVICE_ROOT / "mcpToolManifest.json"
 EXPECTED_TOOLS = [tool["name"] for tool in json.loads(_MANIFEST_PATH.read_text())["tools"]]
+# Tools this fork adds on top of the upstream manifest (the manifest is shared with typescript/).
+FORK_WRITE_TOOLS = {
+    "set_ad_account_state",
+    "update_ad_account_brand",
+}
+EXPECTED_TOOLS = EXPECTED_TOOLS + sorted(FORK_WRITE_TOOLS)
 
 EXPECTED_WRITE_TOOLS = {
     "create_campaign",
@@ -39,7 +45,7 @@ EXPECTED_WRITE_TOOLS = {
     "send_conversions",
     "build_campaign",
     "bulk_ab_test_hints",
-}
+} | FORK_WRITE_TOOLS
 EXPECTED_DESTRUCTIVE_TOOLS = {
     "create_campaign",
     "update_campaign",
@@ -48,6 +54,7 @@ EXPECTED_DESTRUCTIVE_TOOLS = {
     "set_ad_state",
     "manage_audience",
     "build_campaign",
+    "set_ad_account_state",
 }
 EXPECTED_OPEN_WORLD_TOOLS = {
     "get_account",
@@ -76,11 +83,14 @@ EXPECTED_OPEN_WORLD_TOOLS = {
     "send_conversions",
     "build_campaign",
     "bulk_ab_test_hints",
-}
+} | FORK_WRITE_TOOLS
 EXPECTED_READONLY_WRITE_TOOLS = {"manage_conversions"}
 
 USED_OPENAI_ADS_PATHS = {
     "/ad_account",
+    "/ad_account/activate",
+    "/ad_account/pause",
+    "/ad_account/brand",
     "/ad_account/insights",
     "/campaigns",
     "/campaigns/{campaign_id}",
@@ -138,7 +148,7 @@ class TestToolRegistration:
         assert registered == expected
 
     def test_tool_count_is_curated(self):
-        assert len(self._tools()) == 27
+        assert len(self._tools()) == 27 + len(FORK_WRITE_TOOLS)
 
     def test_all_tools_have_descriptions_and_annotations(self):
         for name, tool in self._tools().items():
@@ -196,6 +206,7 @@ class TestToolRegistration:
         assert "send_conversions" not in names
         assert "manage_conversions" in names
         assert not (names & (EXPECTED_WRITE_TOOLS - EXPECTED_READONLY_WRITE_TOOLS))
+        assert not (names & FORK_WRITE_TOOLS)
 
 
 class TestReadTools:
@@ -880,6 +891,35 @@ class TestErrorHandling:
         finally:
             await client.close()
         assert data == {"ok": True}
+
+
+class TestAccountWrites:
+    @pytest.mark.asyncio
+    async def test_set_ad_account_state(self, mock_client):
+        from openai_ads_mcp.tools_account import set_ad_account_state
+
+        await set_ad_account_state("pause")
+        mock_client.post.assert_called_with("/ad_account/pause")
+        await set_ad_account_state("activate")
+        mock_client.post.assert_called_with("/ad_account/activate")
+        mock_client.post.reset_mock()
+        data = json.loads(await set_ad_account_state("archive"))
+        assert data["error"] is True
+        mock_client.post.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_update_ad_account_brand(self, mock_client):
+        from openai_ads_mcp.tools_account import update_ad_account_brand
+
+        await update_ad_account_brand(brand_name=" Trakkr ", url="https://trakkr.ai", favicon_file_id="file_1")
+        mock_client.post.assert_called_once_with(
+            "/ad_account/brand",
+            json={"brand_name": "Trakkr", "url": "https://trakkr.ai", "favicon_file_id": "file_1"},
+        )
+        mock_client.post.reset_mock()
+        data = json.loads(await update_ad_account_brand())
+        assert data["error"] is True
+        mock_client.post.assert_not_called()
 
 
 class TestOpenAPIDrift:
