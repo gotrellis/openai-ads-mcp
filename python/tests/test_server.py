@@ -26,6 +26,7 @@ EXPECTED_TOOLS = [tool["name"] for tool in json.loads(_MANIFEST_PATH.read_text()
 FORK_WRITE_TOOLS = {
     "set_ad_account_state",
     "update_ad_account_brand",
+    "update_product_feed_products",
 }
 EXPECTED_TOOLS = EXPECTED_TOOLS + sorted(FORK_WRITE_TOOLS)
 
@@ -114,6 +115,7 @@ USED_OPENAI_ADS_PATHS = {
     "/custom_audiences",
     "/custom_audiences/{custom_audience_id}",
     "/uploads",
+    "/feeds/{feed_id}/products",
     "/custom_audiences/{custom_audience_id}/archive",
     "/conversions/pixels",
     "/conversions/api_keys",
@@ -130,6 +132,7 @@ def mock_client():
     mock = AsyncMock()
     mock.get = AsyncMock(return_value={"ok": True, "data": []})
     mock.post = AsyncMock(return_value={"ok": True, "id": "created"})
+    mock.patch = AsyncMock(return_value={"ok": True})
     mock.upload_file = AsyncMock(return_value={"file_id": "file_123"})
     mock.upload_bytes = AsyncMock(return_value={"file_id": "file_123"})
     mock.post_conversions = AsyncMock(return_value={"ok": True, "received": 1})
@@ -1153,6 +1156,55 @@ class TestClientMultipart:
         finally:
             await client.close()
         assert data == {"file_id": "file_1"}
+
+
+class TestProductFeeds:
+    @pytest.mark.asyncio
+    async def test_update_product_feed_products(self, mock_client):
+        from openai_ads_mcp.tools_feeds import update_product_feed_products
+
+        products = [{
+            "id": "prod_1",
+            "variants": [{
+                "id": "var_1",
+                "price": {"amount": 2500, "currency": "USD"},
+                "availability": {"available": False},
+            }],
+        }]
+        await update_product_feed_products("feed_1", json.dumps(products))
+        mock_client.patch.assert_called_once_with("/feeds/feed_1/products", json={"products": products})
+
+    @pytest.mark.asyncio
+    async def test_update_product_feed_products_validation(self, mock_client):
+        from openai_ads_mcp.tools_feeds import update_product_feed_products
+
+        for products in (
+            [],
+            [{"id": "prod_1", "variants": []}],
+            [{"id": "prod_1", "variants": [{"id": "var_1", "price": {"amount": 9.99, "currency": "USD"}}]}],
+            [{"id": "prod_1", "variants": [{"id": "var_1", "price": {"amount": 999, "currency": "US"}}]}],
+            [{"variants": [{"id": "var_1"}]}],
+        ):
+            data = json.loads(await update_product_feed_products("feed_1", products))
+            assert data["error"] is True
+        mock_client.patch.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_client_patch(self):
+        async def handler(request: httpx.Request) -> httpx.Response:
+            assert request.method == "PATCH"
+            assert str(request.url) == "https://ads.test/v1/feeds/feed_1/products"
+            assert json.loads(request.content) == {"products": []}
+            return httpx.Response(200, json={"id": "delta_1", "accepted": True}, request=request)
+
+        client = OpenAIAdsClient("test", base_url="https://ads.test/v1")
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://ads.test/v1")
+        try:
+            data = await client.patch("/feeds/feed_1/products", json={"products": []})
+        finally:
+            await client.close()
+        assert data == {"id": "delta_1", "accepted": True}
 
 
 class TestOpenAPIDrift:
