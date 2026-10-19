@@ -1242,6 +1242,20 @@ class TestAdGroupFields:
         await update_ad_group(ad_group_id="ag_1", description="New notes")
         mock_client.post.assert_called_once_with("/ad_groups/ag_1", json={"description": "New notes"})
 
+    @pytest.mark.asyncio
+    async def test_max_bid_is_capped_at_the_api_maximum_not_100(self, mock_client):
+        from openai_ads_mcp.tools_adgroups import update_ad_group
+
+        # account currency: a ₹500 bid is ordinary on an INR account
+        await update_ad_group(ad_group_id="ag_1", billing_event="click", max_bid=500)
+        body = mock_client.post.call_args.kwargs["json"]
+        assert body["bidding_config"]["max_bid_micros"] == 500_000_000
+
+        mock_client.post.reset_mock()
+        data = json.loads(await update_ad_group(ad_group_id="ag_1", billing_event="click", max_bid=30_400_001))
+        assert data["error"] is True
+        mock_client.post.assert_not_called()
+
 
 class TestAudienceUpload:
     @pytest.mark.asyncio

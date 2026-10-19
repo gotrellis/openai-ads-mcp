@@ -8,6 +8,9 @@ _AD_GROUP_STATES = {"activate", "pause", "archive"}
 _AD_GROUP_STATUSES = {"active", "paused", "archived"}
 _BILLING_EVENTS = {"impression", "click"}
 _BIDDING_STRATEGIES = {"fixed_bid", "maximize_clicks", "maximize_conversions"}
+# The spec's BiddingConfigParams.max_bid_micros maximum (30.4e12 micros), in major units of the account currency.
+# Spend is limited by campaign budgets and their confirm_budget ceiling, not by the bid.
+_MAX_BID = 30_400_000
 _PRODUCT_SET_FILTER_OPERATORS = {"in", "gt", "gte", "lt", "lte"}
 _PRODUCT_SET_FILTER_FIELDS = {
     "title",
@@ -160,7 +163,7 @@ def _build_ad_group_body(
                 return None, strategy_err
             bidding_config["strategy"] = bidding_strategy
         if max_bid is not None:
-            if bid_err := _validate_float_range("max_bid", float(max_bid), 0.000001, 100):
+            if bid_err := _validate_float_range("max_bid", float(max_bid), 0.000001, _MAX_BID):
                 return None, bid_err
             bidding_config["max_bid_micros"] = _to_micros(float(max_bid))
         if multipliers is not None:
@@ -249,7 +252,7 @@ async def create_ad_group(
         name: Ad group name, 3-1000 characters.
         billing_event: impression or click.
         max_bid: Max bid in the ad account's currency, major units (1.5 = ₹1.50 or $1.50;
-            see get_account), sent as micros. Must be > 0 and <= 100. Required
+            see get_account), sent as micros. Must be > 0 and within the API maximum (30,400,000). Required
             unless bidding_strategy is maximize_clicks or maximize_conversions, where it acts as a bid cap.
         status: Must be paused. To go live, call set_ad_group_state after review.
         description: Optional internal description.
