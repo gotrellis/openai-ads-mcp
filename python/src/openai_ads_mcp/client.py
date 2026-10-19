@@ -26,6 +26,16 @@ _FRIENDLY_ERRORS: dict[int, str] = {
 }
 
 
+def _encode_query(params: dict | None) -> dict | None:
+    """Send array query params as ``name[]=v``; the API rejects repeated plain ``name=v`` with 400."""
+    if not params:
+        return params
+    return {
+        f"{key}[]" if isinstance(value, list | tuple) and not key.endswith("[]") else key: value
+        for key, value in params.items()
+    }
+
+
 class OpenAIAdsAPIError(Exception):
     """Raised when the OpenAI Ads API returns a non-2xx response."""
 
@@ -107,7 +117,7 @@ class OpenAIAdsClient:
     ) -> dict:
         try:
             headers = {"Idempotency-Key": idempotency_key} if idempotency_key else None
-            resp = await client.request(method, path.lstrip("/"), params=params, json=json, files=files, data=data, headers=headers)
+            resp = await client.request(method, path.lstrip("/"), params=_encode_query(params), json=json, files=files, data=data, headers=headers)
             resp.raise_for_status()
             if not resp.content:
                 return {}

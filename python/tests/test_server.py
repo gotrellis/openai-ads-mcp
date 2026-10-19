@@ -939,6 +939,53 @@ class TestErrorHandling:
             await client.close()
         assert data == {"ok": True}
 
+    @pytest.mark.asyncio
+    async def test_get_insights_sends_array_params_with_brackets(self):
+        import openai_ads_mcp._core as core
+        from openai_ads_mcp.tools_insights import get_insights
+
+        seen: list[httpx.URL] = []
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request.url)
+            return httpx.Response(200, json={"data": []}, request=request)
+
+        client = OpenAIAdsClient("test", base_url="https://ads.test/v1")
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://ads.test/v1")
+        original, core._client = core._client, client
+        try:
+            await get_insights(
+                scope="account",
+                time_range={"type": "date_range", "start": "2026-10-01", "end": "2026-10-07", "timezone": "Asia/Kolkata"},
+                fields=["campaign.id", "metrics.spend"],
+                sort=[{"field": "metrics.spend", "direction": "desc"}],
+            )
+        finally:
+            core._client = original
+            await client.close()
+        keys = [key for key, _ in seen[0].params.multi_items()]
+        assert keys.count("time_ranges[]") == 1
+        assert keys.count("fields[]") == 2
+        assert keys.count("sort[]") == 1
+        assert "time_ranges" not in keys and "fields" not in keys
+        assert "time_ranges%5B%5D=" in str(seen[0]) and "fields%5B%5D=" in str(seen[0])
+        assert seen[0].params["limit"] == "20"
+
+    @pytest.mark.asyncio
+    async def test_client_does_not_double_suffix_bracket_keys(self):
+        async def handler(request: httpx.Request) -> httpx.Response:
+            assert [key for key, _ in request.url.params.multi_items()] == ["include[]", "include[]", "limit"]
+            return httpx.Response(200, json={"ok": True}, request=request)
+
+        client = OpenAIAdsClient("test", base_url="https://ads.test/v1")
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://ads.test/v1")
+        try:
+            assert await client.get("/campaigns", params={"include[]": ("a", "b"), "limit": 5}) == {"ok": True}
+        finally:
+            await client.close()
+
 
 class TestAccountWrites:
     @pytest.mark.asyncio
