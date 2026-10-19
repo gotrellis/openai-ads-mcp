@@ -237,7 +237,7 @@ def _ok_sized(data: Any, response_format: str = "detailed", *, follow_up: str | 
     return _ok(data)
 
 
-_HARD_ERROR_STATUSES = frozenset({0, 401})
+_HARD_ERROR_STATUSES = frozenset({0, 401, 429})
 
 
 def _err(e: OpenAIAdsAPIError) -> str:

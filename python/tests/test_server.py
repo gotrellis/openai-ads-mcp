@@ -926,7 +926,7 @@ class TestErrorHandling:
     def test_soft_statuses_return_json(self):
         from openai_ads_mcp._core import _err
 
-        for status in (400, 403, 404, 422, 429):
+        for status in (400, 403, 404, 422):
             data = json.loads(_err(OpenAIAdsAPIError(status, f"msg {status}")))
             assert data["error"] is True
             assert data["message"] == f"msg {status}"
@@ -936,7 +936,7 @@ class TestErrorHandling:
 
         from mcp.server.mcpserver.exceptions import ToolError
 
-        for status in (0, 401, 500, 503, 504):
+        for status in (0, 401, 429, 500, 503, 504):
             with pytest.raises(ToolError, match=rf"\(HTTP {status}\): boom {status}"):
                 _err(OpenAIAdsAPIError(status, f"boom {status}"))
 
@@ -1409,3 +1409,96 @@ class TestOpenAPIDrift:
         paths = set(json.loads(spec_path.read_text())["paths"])
         missing = USED_OPENAI_ADS_PATHS - paths
         assert not missing, f"Paths missing from vendored OpenAPI spec: {sorted(missing)}"
+
+
+def _transport_client(handler) -> OpenAIAdsClient:
+    client = OpenAIAdsClient("test", base_url="https://ads.test/v1")
+    client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://ads.test/v1")
+    return client
+
+
+@pytest.fixture
+def real_client():
+    """Swap the mock for a real OpenAIAdsClient over a MockTransport; yields (seen requests, set_handler)."""
+    import openai_ads_mcp._core as core
+
+    seen: list[httpx.Request] = []
+    state = {"handler": lambda request: httpx.Response(200, json={"ok": True}, request=request)}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return state["handler"](request)
+
+    client = _transport_client(handler)
+    original, core._client = core._client, client
+    yield seen, lambda fn: state.__setitem__("handler", fn)
+    core._client = original
+
+
+class TestReviewFixes:
+
+    @pytest.mark.asyncio
+    async def test_path_guard_sends_nothing(self, real_client):
+        from openai_ads_mcp.tools_adgroups import update_ad_group
+        from openai_ads_mcp.tools_campaigns import get_campaign
+
+        seen, _ = real_client
+        for kwargs in (
+            {"ad_group_id": "../campaigns/c1/activate", "name": "Renamed"},
+            {"ad_group_id": "../campaigns/c1/activate", "max_bid": 1, "billing_event": "click"},
+            {"ad_group_id": "%2e%2e/campaigns/c1/activate", "name": "Renamed"},
+            {"ad_group_id": "ag_1?x=1", "name": "Renamed"},
+            {"ad_group_id": "ag_1#frag", "name": "Renamed"},
+        ):
+            data = json.loads(await update_ad_group(**kwargs))
+            assert data["error"] is True, kwargs
+            assert "Nothing was sent" in data["message"]
+        data = json.loads(await get_campaign("../ad_account"))
+        assert "'.' or '..' segments" in data["message"]
+        assert seen == []
+
+    @pytest.mark.asyncio
+    async def test_429_raises_and_write_failures_say_check_first(self, real_client):
+        from mcp.server.mcpserver.exceptions import ToolError
+
+        from openai_ads_mcp.tools_campaigns import get_campaign, update_campaign
+
+        _, set_handler = real_client
+        set_handler(lambda request: httpx.Response(429, json={"message": "slow down"}, request=request))
+        with pytest.raises(ToolError, match=r"OpenAI Ads API error \(HTTP 429\): Rate limited"):
+            await get_campaign("camp_1")
+
+        set_handler(lambda request: httpx.Response(503, request=request))
+        with pytest.raises(ToolError, match="list or get before retrying"):
+            await update_campaign(campaign_id="camp_1", name="New name")
+        with pytest.raises(ToolError) as excinfo:
+            await get_campaign("camp_1")
+        assert "may have succeeded" not in str(excinfo.value)
+
+        def timeout(request):
+            raise httpx.ReadTimeout("slow", request=request)
+
+        set_handler(timeout)
+        with pytest.raises(ToolError, match=r"\(HTTP 504\): Request timed out.*The write may have succeeded"):
+            await update_campaign(campaign_id="camp_1", name="New name")
+
+    def test_api_reason_reads_string_error(self):
+        from openai_ads_mcp.client import _api_reason
+
+        response = httpx.Response(404, json={"error": "Ad group not found"})
+        assert _api_reason(response) == "Ad group not found"
+
+    @pytest.mark.asyncio
+    async def test_hard_error_text_reaches_an_mcp_client(self, monkeypatch):
+        # Through the real MCPServer request path (in-memory client), not by calling the function.
+        import openai_ads_mcp._core as core
+        from mcp import Client
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(401, json={"message": "bad key"}, request=request)
+
+        monkeypatch.setattr(core, "OpenAIAdsClient", lambda api_key, base_url: _transport_client(handler))
+        async with Client(mcp) as client:
+            result = await client.call_tool("get_account", {})
+        assert result.is_error is True
+        assert "OpenAI Ads API error (HTTP 401): Invalid or expired OPENAI_ADS_API_KEY." in result.content[0].text

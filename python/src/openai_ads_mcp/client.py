@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 import httpx
 
@@ -37,6 +37,8 @@ def _api_reason(response: httpx.Response) -> str | None:
         return response.text.strip()[:300] or None
     if not isinstance(body, dict):
         return str(body)[:300] or None
+    if isinstance(body.get("error"), str):
+        return body["error"][:300] or None
     error = body["error"] if isinstance(body.get("error"), dict) else body
     message = error.get("message") or error.get("detail") or body.get("detail")
     code = error.get("code")
@@ -44,6 +46,19 @@ def _api_reason(response: httpx.Response) -> str | None:
         return None
     reason = str(message or "")[:300]
     return f"{reason} (code {code})".strip() if code else reason
+
+
+_WRITE_MAY_HAVE_SUCCEEDED = " The write may have succeeded — list or get before retrying."
+
+
+def _unsafe_path_reason(path: str) -> str | None:
+    """Why a request path is refused: an id must not walk to another endpoint or smuggle a query."""
+    decoded = unquote(path)
+    if "?" in decoded or "#" in decoded:
+        return "must not contain '?' or '#'"
+    if any(segment in {".", ".."} for segment in decoded.split("/")):
+        return "must not contain '.' or '..' segments"
+    return None
 
 
 def _encode_query(params: dict | None) -> dict | None:
@@ -135,6 +150,9 @@ class OpenAIAdsClient:
         redact_detail: bool = False,
         idempotency_key: str | None = None,
     ) -> dict:
+        if reason := _unsafe_path_reason(path):
+            raise OpenAIAdsAPIError(400, f"Refused to send {method} {path!r}: ids in the path {reason}. Nothing was sent.")
+        write = method != "GET"
         try:
             headers = {"Idempotency-Key": idempotency_key} if idempotency_key else None
             resp = await client.request(method, path.lstrip("/"), params=_encode_query(params), json=json, files=files, data=data, headers=headers)
@@ -154,6 +172,8 @@ class OpenAIAdsClient:
                 message = "OpenAI Ads API is temporarily unavailable. Please try again shortly."
                 if request_id:
                     message = f"{message} Request ID: {request_id}"
+                if write:
+                    message += _WRITE_MAY_HAVE_SUCCEEDED
                 raise OpenAIAdsAPIError(status, message) from exc
             detail = f"HTTP {status}"
             if not redact_detail:
@@ -164,7 +184,8 @@ class OpenAIAdsClient:
                     detail = exc.response.text or detail
             raise OpenAIAdsAPIError(status, f"API error ({status}): {detail}") from exc
         except httpx.TimeoutException as exc:
-            raise OpenAIAdsAPIError(504, "Request timed out. The OpenAI Ads API may be under heavy load.") from exc
+            message = "Request timed out. The OpenAI Ads API may be under heavy load."
+            raise OpenAIAdsAPIError(504, message + _WRITE_MAY_HAVE_SUCCEEDED if write else message) from exc
         except httpx.RequestError as exc:
             raise OpenAIAdsAPIError(
                 0,
