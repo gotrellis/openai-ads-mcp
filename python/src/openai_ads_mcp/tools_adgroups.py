@@ -7,6 +7,7 @@ from ._core import *
 _AD_GROUP_STATES = {"activate", "pause", "archive"}
 _AD_GROUP_STATUSES = {"active", "paused", "archived"}
 _BILLING_EVENTS = {"impression", "click"}
+_BIDDING_STRATEGIES = {"fixed_bid", "maximize_clicks", "maximize_conversions"}
 _PRODUCT_SET_FILTER_OPERATORS = {"in", "gt", "gte", "lt", "lte"}
 _PRODUCT_SET_FILTER_FIELDS = {
     "title",
@@ -68,13 +69,46 @@ def _product_set_payload(product_set: Any) -> tuple[dict[str, Any] | None, str |
     return payload, None
 
 
+def _bid_multipliers_payload(value: Any) -> tuple[list[dict[str, Any]] | None, str | None]:
+    entries, err = _coerce_list(value, "custom_audience_bid_multipliers")
+    if err or entries is None:
+        return None, err
+    out: list[dict[str, Any]] = []
+    for index, entry in enumerate(entries):
+        if isinstance(entry, str):
+            entry, entry_err = _coerce_mapping(entry, f"custom_audience_bid_multipliers[{index}]")
+            if entry_err:
+                return None, entry_err
+        if not isinstance(entry, dict):
+            return None, _bad_request(f"custom_audience_bid_multipliers[{index}] must be an object.")
+        if audience_err := _validate_non_empty(
+            f"custom_audience_bid_multipliers[{index}].custom_audience_id", entry.get("custom_audience_id")
+        ):
+            return None, audience_err
+        multiplier = entry.get("bid_multiplier")
+        if not isinstance(multiplier, int | float) or isinstance(multiplier, bool):
+            return None, _bad_request(f"custom_audience_bid_multipliers[{index}].bid_multiplier must be a number.")
+        if range_err := _validate_float_range(
+            f"custom_audience_bid_multipliers[{index}].bid_multiplier", float(multiplier), 0.1, 10
+        ):
+            return None, range_err
+        out.append({
+            "custom_audience_id": entry["custom_audience_id"].strip(),
+            "bid_multiplier_micros": _usd_to_micros(float(multiplier)),
+        })
+    return out, None
+
+
 def _build_ad_group_body(
     *,
     campaign_id: str | None = None,
     name: str | None = None,
+    description: str | None = None,
     status: str | None = None,
     billing_event: str | None = None,
     max_bid_usd: float | None = None,
+    bidding_strategy: str | None = None,
+    custom_audience_bid_multipliers: Any = None,
     context_hints: Any = None,
     product_set: Any = None,
     create: bool = False,
@@ -90,6 +124,8 @@ def _build_ad_group_body(
         body["name"] = name.strip()
     elif create:
         return None, _bad_request("name is required.")
+    if description is not None:
+        body["description"] = description
     if status is not None:
         if status not in _AD_GROUP_STATUSES:
             return None, _bad_request("status must be active, paused, or archived.")
@@ -100,17 +136,36 @@ def _build_ad_group_body(
         body["status"] = status
     elif create:
         body["status"] = "paused"
-    if billing_event is not None or max_bid_usd is not None:
-        if billing_event is None or max_bid_usd is None:
-            return None, _bad_request("billing_event and max_bid_usd must be provided together.")
+    multipliers, multipliers_err = _bid_multipliers_payload(custom_audience_bid_multipliers)
+    if multipliers_err:
+        return None, multipliers_err
+    if (
+        billing_event is not None
+        or max_bid_usd is not None
+        or bidding_strategy is not None
+        or multipliers is not None
+    ):
+        # ponytail: max_bid is only optional for maximize_* strategies, so a bid edit never silently falls back to AutoBid.
+        bid_optional = bidding_strategy in {"maximize_clicks", "maximize_conversions"}
+        if billing_event is None or (max_bid_usd is None and not bid_optional):
+            return None, _bad_request(
+                "billing_event and max_bid_usd must be provided together "
+                "(max_bid_usd is optional only with bidding_strategy maximize_clicks or maximize_conversions)."
+            )
         if billing_event not in _BILLING_EVENTS:
             return None, _bad_request("billing_event must be impression or click.")
-        if bid_err := _validate_float_range("max_bid_usd", float(max_bid_usd), 0.000001, 100):
-            return None, bid_err
-        body["bidding_config"] = {
-            "billing_event_type": billing_event,
-            "max_bid_micros": _usd_to_micros(float(max_bid_usd)),
-        }
+        bidding_config: dict[str, Any] = {"billing_event_type": billing_event}
+        if bidding_strategy is not None:
+            if strategy_err := _validate_option("bidding_strategy", bidding_strategy, _BIDDING_STRATEGIES):
+                return None, strategy_err
+            bidding_config["strategy"] = bidding_strategy
+        if max_bid_usd is not None:
+            if bid_err := _validate_float_range("max_bid_usd", float(max_bid_usd), 0.000001, 100):
+                return None, bid_err
+            bidding_config["max_bid_micros"] = _usd_to_micros(float(max_bid_usd))
+        if multipliers is not None:
+            bidding_config["custom_audience_bid_multipliers"] = multipliers
+        body["bidding_config"] = bidding_config
     elif create:
         return None, _bad_request("billing_event and max_bid_usd are required.")
     if context_hints is not None:
@@ -178,8 +233,11 @@ async def create_ad_group(
     campaign_id: str,
     name: str,
     billing_event: Literal["impression", "click"],
-    max_bid_usd: float,
+    max_bid_usd: float | None = None,
     status: Literal["paused"] = "paused",
+    description: str | None = None,
+    bidding_strategy: Literal["fixed_bid", "maximize_clicks", "maximize_conversions"] | None = None,
+    custom_audience_bid_multipliers: Any = None,
     context_hints: Any = None,
     product_set: Any = None,
     idempotency_key: str | None = None,
@@ -190,16 +248,24 @@ async def create_ad_group(
         campaign_id: Parent campaign id.
         name: Ad group name, 3-1000 characters.
         billing_event: impression or click.
-        max_bid_usd: Max bid converted to micros. Must be > 0 and <= 100.
+        max_bid_usd: Max bid converted to micros. Must be > 0 and <= 100. Required
+            unless bidding_strategy is maximize_clicks or maximize_conversions, where it acts as a bid cap.
         status: Must be paused. To go live, call set_ad_group_state after review.
+        description: Optional internal description.
+        bidding_strategy: Optional fixed_bid, maximize_clicks, or maximize_conversions.
+        custom_audience_bid_multipliers: Optional list of {"custom_audience_id": "...", "bid_multiplier": 1.5},
+            multiplier between 0.1 and 10.
         context_hints: Optional list of strings that steer matching context.
     """
     body, body_err = _build_ad_group_body(
         campaign_id=campaign_id,
         name=name,
+        description=description,
         status=status,
         billing_event=billing_event,
         max_bid_usd=max_bid_usd,
+        bidding_strategy=bidding_strategy,
+        custom_audience_bid_multipliers=custom_audience_bid_multipliers,
         context_hints=context_hints,
         product_set=product_set,
         create=True,
@@ -228,17 +294,28 @@ async def update_ad_group(
     billing_event: Literal["impression", "click"] | None = None,
     max_bid_usd: float | None = None,
     status: Literal["paused", "archived"] | None = None,
+    description: str | None = None,
+    bidding_strategy: Literal["fixed_bid", "maximize_clicks", "maximize_conversions"] | None = None,
+    custom_audience_bid_multipliers: Any = None,
     context_hints: Any = None,
     product_set: Any = None,
 ) -> str:
-    """Update ad group fields, including bid and context hints."""
+    """Update ad group fields, including bid and context hints.
+
+    Any bidding change (max_bid_usd, bidding_strategy, custom_audience_bid_multipliers)
+    sends a full bidding_config, so billing_event is required with it, and
+    max_bid_usd too unless bidding_strategy is maximize_clicks or maximize_conversions.
+    """
     if ad_group_err := _validate_non_empty("ad_group_id", ad_group_id):
         return ad_group_err
     body, body_err = _build_ad_group_body(
         name=name,
+        description=description,
         status=status,
         billing_event=billing_event,
         max_bid_usd=max_bid_usd,
+        bidding_strategy=bidding_strategy,
+        custom_audience_bid_multipliers=custom_audience_bid_multipliers,
         context_hints=context_hints,
         product_set=product_set,
     )

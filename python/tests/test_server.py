@@ -983,6 +983,54 @@ class TestCampaignFields:
         mock_client.post.assert_not_called()
 
 
+class TestAdGroupFields:
+    @pytest.mark.asyncio
+    async def test_ad_group_description_strategy_and_multipliers(self, mock_client):
+        from openai_ads_mcp.tools_adgroups import create_ad_group
+
+        await create_ad_group(
+            campaign_id="camp_1",
+            name="Converters",
+            description="Retargeting buyers",
+            billing_event="click",
+            bidding_strategy="maximize_conversions",
+            custom_audience_bid_multipliers=[{"custom_audience_id": "aud_1", "bid_multiplier": 1.5}],
+        )
+        payload = mock_client.post.call_args.kwargs["json"]
+        assert payload["description"] == "Retargeting buyers"
+        assert payload["bidding_config"] == {
+            "billing_event_type": "click",
+            "strategy": "maximize_conversions",
+            "custom_audience_bid_multipliers": [{"custom_audience_id": "aud_1", "bid_multiplier_micros": 1_500_000}],
+        }
+
+    @pytest.mark.asyncio
+    async def test_ad_group_bidding_guards(self, mock_client):
+        from openai_ads_mcp.tools_adgroups import create_ad_group, update_ad_group
+
+        # fixed bids still need max_bid_usd, so a bid edit never silently becomes AutoBid
+        data = json.loads(await create_ad_group(
+            campaign_id="camp_1", name="Fixed", billing_event="click", bidding_strategy="fixed_bid",
+        ))
+        assert data["error"] is True
+        data = json.loads(await update_ad_group(
+            ad_group_id="ag_1",
+            custom_audience_bid_multipliers=[{"custom_audience_id": "aud_1", "bid_multiplier": 2}],
+        ))
+        assert data["error"] is True
+        data = json.loads(await update_ad_group(
+            ad_group_id="ag_1",
+            billing_event="click",
+            max_bid_usd=1,
+            custom_audience_bid_multipliers=[{"custom_audience_id": "aud_1", "bid_multiplier": 50}],
+        ))
+        assert data["error"] is True
+        mock_client.post.assert_not_called()
+
+        await update_ad_group(ad_group_id="ag_1", description="New notes")
+        mock_client.post.assert_called_once_with("/ad_groups/ag_1", json={"description": "New notes"})
+
+
 class TestOpenAPIDrift:
     def test_openapi_contains_every_ads_endpoint_used(self):
         spec_path = _SERVICE_ROOT / "openapi.json"

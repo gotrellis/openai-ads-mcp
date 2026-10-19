@@ -69,11 +69,18 @@ class OpenAIAdsClient:
     async def post(self, path: str, json: dict | None = None, idempotency_key: str | None = None) -> dict:
         return await self._request(self._client, "POST", path, json=json, idempotency_key=idempotency_key)
 
-    async def upload_file(self, path: str, file_path: str) -> dict:
+    async def patch(self, path: str, json: dict | None = None) -> dict:
+        return await self._request(self._client, "PATCH", path, json=json)
+
+    async def upload_file(self, path: str, file_path: str, data: dict | None = None) -> dict:
         local_path = Path(file_path).expanduser()
         with local_path.open("rb") as handle:
             files = {"file": (local_path.name, handle)}
-            return await self._request(self._client, "POST", path, files=files)
+            return await self._request(self._client, "POST", path, files=files, data=data)
+
+    async def upload_bytes(self, path: str, filename: str, content: bytes, data: dict | None = None) -> dict:
+        files = {"file": (filename, content)}
+        return await self._request(self._client, "POST", path, files=files, data=data)
 
     async def post_conversions(self, pixel_id: str, events: list[dict], validate_only: bool = False) -> dict:
         return await self._request(
@@ -94,12 +101,13 @@ class OpenAIAdsClient:
         params: dict | None = None,
         json: dict | None = None,
         files: dict | None = None,
+        data: dict | None = None,
         redact_detail: bool = False,
         idempotency_key: str | None = None,
     ) -> dict:
         try:
             headers = {"Idempotency-Key": idempotency_key} if idempotency_key else None
-            resp = await client.request(method, path.lstrip("/"), params=params, json=json, files=files, headers=headers)
+            resp = await client.request(method, path.lstrip("/"), params=params, json=json, files=files, data=data, headers=headers)
             resp.raise_for_status()
             if not resp.content:
                 return {}
