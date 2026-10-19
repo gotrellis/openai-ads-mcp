@@ -106,7 +106,7 @@ def _build_ad_group_body(
     description: str | None = None,
     status: str | None = None,
     billing_event: str | None = None,
-    max_bid_usd: float | None = None,
+    max_bid: float | None = None,
     bidding_strategy: str | None = None,
     custom_audience_bid_multipliers: Any = None,
     context_hints: Any = None,
@@ -141,16 +141,16 @@ def _build_ad_group_body(
         return None, multipliers_err
     if (
         billing_event is not None
-        or max_bid_usd is not None
+        or max_bid is not None
         or bidding_strategy is not None
         or multipliers is not None
     ):
         # ponytail: max_bid is only optional for maximize_* strategies, so a bid edit never silently falls back to AutoBid.
         bid_optional = bidding_strategy in {"maximize_clicks", "maximize_conversions"}
-        if billing_event is None or (max_bid_usd is None and not bid_optional):
+        if billing_event is None or (max_bid is None and not bid_optional):
             return None, _bad_request(
-                "billing_event and max_bid_usd must be provided together "
-                "(max_bid_usd is optional only with bidding_strategy maximize_clicks or maximize_conversions)."
+                "billing_event and max_bid must be provided together "
+                "(max_bid is optional only with bidding_strategy maximize_clicks or maximize_conversions)."
             )
         if billing_event not in _BILLING_EVENTS:
             return None, _bad_request("billing_event must be impression or click.")
@@ -159,15 +159,15 @@ def _build_ad_group_body(
             if strategy_err := _validate_option("bidding_strategy", bidding_strategy, _BIDDING_STRATEGIES):
                 return None, strategy_err
             bidding_config["strategy"] = bidding_strategy
-        if max_bid_usd is not None:
-            if bid_err := _validate_float_range("max_bid_usd", float(max_bid_usd), 0.000001, 100):
+        if max_bid is not None:
+            if bid_err := _validate_float_range("max_bid", float(max_bid), 0.000001, 100):
                 return None, bid_err
-            bidding_config["max_bid_micros"] = _to_micros(float(max_bid_usd))
+            bidding_config["max_bid_micros"] = _to_micros(float(max_bid))
         if multipliers is not None:
             bidding_config["custom_audience_bid_multipliers"] = multipliers
         body["bidding_config"] = bidding_config
     elif create:
-        return None, _bad_request("billing_event and max_bid_usd are required.")
+        return None, _bad_request("billing_event and max_bid are required.")
     if context_hints is not None:
         hints, hints_err = _coerce_string_list(context_hints, "context_hints")
         if hints_err:
@@ -233,7 +233,7 @@ async def create_ad_group(
     campaign_id: str,
     name: str,
     billing_event: Literal["impression", "click"],
-    max_bid_usd: float | None = None,
+    max_bid: float | None = None,
     status: Literal["paused"] = "paused",
     description: str | None = None,
     bidding_strategy: Literal["fixed_bid", "maximize_clicks", "maximize_conversions"] | None = None,
@@ -248,7 +248,8 @@ async def create_ad_group(
         campaign_id: Parent campaign id.
         name: Ad group name, 3-1000 characters.
         billing_event: impression or click.
-        max_bid_usd: Max bid converted to micros. Must be > 0 and <= 100. Required
+        max_bid: Max bid in the ad account's currency, major units (1.5 = ₹1.50 or $1.50;
+            see get_account), sent as micros. Must be > 0 and <= 100. Required
             unless bidding_strategy is maximize_clicks or maximize_conversions, where it acts as a bid cap.
         status: Must be paused. To go live, call set_ad_group_state after review.
         description: Optional internal description.
@@ -263,7 +264,7 @@ async def create_ad_group(
         description=description,
         status=status,
         billing_event=billing_event,
-        max_bid_usd=max_bid_usd,
+        max_bid=max_bid,
         bidding_strategy=bidding_strategy,
         custom_audience_bid_multipliers=custom_audience_bid_multipliers,
         context_hints=context_hints,
@@ -292,7 +293,7 @@ async def update_ad_group(
     ad_group_id: str,
     name: str | None = None,
     billing_event: Literal["impression", "click"] | None = None,
-    max_bid_usd: float | None = None,
+    max_bid: float | None = None,
     status: Literal["paused", "archived"] | None = None,
     description: str | None = None,
     bidding_strategy: Literal["fixed_bid", "maximize_clicks", "maximize_conversions"] | None = None,
@@ -302,9 +303,10 @@ async def update_ad_group(
 ) -> str:
     """Update ad group fields, including bid and context hints.
 
-    Any bidding change (max_bid_usd, bidding_strategy, custom_audience_bid_multipliers)
+    max_bid is in the ad account's currency, major units, like campaign budgets.
+    Any bidding change (max_bid, bidding_strategy, custom_audience_bid_multipliers)
     sends a full bidding_config, so billing_event is required with it, and
-    max_bid_usd too unless bidding_strategy is maximize_clicks or maximize_conversions.
+    max_bid too unless bidding_strategy is maximize_clicks or maximize_conversions.
     """
     if ad_group_err := _validate_non_empty("ad_group_id", ad_group_id):
         return ad_group_err
@@ -313,7 +315,7 @@ async def update_ad_group(
         description=description,
         status=status,
         billing_event=billing_event,
-        max_bid_usd=max_bid_usd,
+        max_bid=max_bid,
         bidding_strategy=bidding_strategy,
         custom_audience_bid_multipliers=custom_audience_bid_multipliers,
         context_hints=context_hints,

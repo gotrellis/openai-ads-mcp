@@ -29,7 +29,8 @@ async def build_campaign(
     currency, major units (500 = ₹500 or $500; call get_account to see the
     currency), guarded by OPENAI_ADS_BUDGET_CEILING unless confirm_budget=True.
 
-    ad_group must be an object with name, billing_event, and max_bid_usd. It may
+    ad_group must be an object with name, billing_event, and max_bid (account
+    currency, major units, like lifetime_budget). It may
     include context_hints. ads must be a list of objects accepted by create_ad:
     name, creative_type, title, body, target_url, file_id, and optional price.
     """
@@ -80,7 +81,7 @@ async def build_campaign(
             campaign_id=campaign_id,
             name=group_payload.get("name"),
             billing_event=group_payload.get("billing_event"),
-            max_bid_usd=group_payload.get("max_bid_usd"),
+            max_bid=group_payload.get("max_bid"),
             status="paused",
             context_hints=group_payload.get("context_hints"),
             product_set=group_payload.get("product_set"),

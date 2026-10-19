@@ -486,7 +486,7 @@ class TestWriteTools:
             campaign_id="camp_1",
             name="Searchers",
             billing_event="click",
-            max_bid_usd=1.25,
+            max_bid=1.25,
             context_hints=["Product: AI visibility"],
             product_set={
                 "product_feed_id": "product_feed_123",
@@ -585,7 +585,7 @@ class TestHelpers:
         result = await build_campaign(
             name="Category test",
             lifetime_budget=50,
-            ad_group={"name": "Buyers", "billing_event": "click", "max_bid_usd": 1.5},
+            ad_group={"name": "Buyers", "billing_event": "click", "max_bid": 1.5},
             ads=[
                 {
                     "name": "Variant A",
@@ -633,7 +633,7 @@ class TestHelpers:
             ad_group={
                 "name": "Feed buyers",
                 "billing_event": "click",
-                "max_bid_usd": 1.5,
+                "max_bid": 1.5,
                 "product_set": {
                     "product_feed_id": "product_feed_123",
                     "filters": [{"field": "brand", "operator": "in", "values": ["Trakkr"]}],
@@ -659,7 +659,7 @@ class TestHelpers:
             lifetime_budget=50,
             bidding_type="conversions",
             conversion_event_setting_id="event_setting_1",
-            ad_group={"name": "Converters", "billing_event": "impression", "max_bid_usd": 5},
+            ad_group={"name": "Converters", "billing_event": "impression", "max_bid": 5},
             ads=[{
                 "name": "Card",
                 "creative_type": "chat_card",
@@ -685,7 +685,7 @@ class TestHelpers:
         data = json.loads(await build_campaign(
             name="Category test",
             lifetime_budget=50,
-            ad_group={"name": "Buyers", "billing_event": "click", "max_bid_usd": 1.5},
+            ad_group={"name": "Buyers", "billing_event": "click", "max_bid": 1.5},
             ads=[{
                 "name": "Variant A",
                 "creative_type": "chat_card",
@@ -1220,7 +1220,7 @@ class TestAdGroupFields:
     async def test_ad_group_bidding_guards(self, mock_client):
         from openai_ads_mcp.tools_adgroups import create_ad_group, update_ad_group
 
-        # fixed bids still need max_bid_usd, so a bid edit never silently becomes AutoBid
+        # fixed bids still need max_bid, so a bid edit never silently becomes AutoBid
         data = json.loads(await create_ad_group(
             campaign_id="camp_1", name="Fixed", billing_event="click", bidding_strategy="fixed_bid",
         ))
@@ -1233,7 +1233,7 @@ class TestAdGroupFields:
         data = json.loads(await update_ad_group(
             ad_group_id="ag_1",
             billing_event="click",
-            max_bid_usd=1,
+            max_bid=1,
             custom_audience_bid_multipliers=[{"custom_audience_id": "aud_1", "bid_multiplier": 50}],
         ))
         assert data["error"] is True
