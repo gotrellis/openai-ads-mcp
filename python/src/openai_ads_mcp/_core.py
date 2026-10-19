@@ -420,13 +420,13 @@ def _usd_to_micros(value: float) -> int:
     return int(round(float(value) * 1_000_000))
 
 
-def _budget_guard(budget_usd: float, confirm_budget: bool) -> str | None:
+def _budget_guard(budget_usd: float, confirm_budget: bool, name: str = "budget_usd") -> str | None:
     if budget_usd < 1:
-        return _bad_request("budget_usd must be at least 1.00 USD.")
+        return _bad_request(f"{name} must be at least 1.00 USD.")
     ceiling = _budget_ceiling_usd()
     if budget_usd > ceiling and not confirm_budget:
         return _bad_request(
-            f"budget_usd is {budget_usd:g}, above the configured ceiling of {ceiling:g} USD. "
+            f"{name} is {budget_usd:g}, above the configured ceiling of {ceiling:g} USD. "
             "Pass confirm_budget=True to confirm this spend limit."
         )
     return None

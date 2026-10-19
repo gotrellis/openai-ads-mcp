@@ -922,6 +922,67 @@ class TestAccountWrites:
         mock_client.post.assert_not_called()
 
 
+class TestCampaignFields:
+    @pytest.mark.asyncio
+    async def test_create_campaign_daily_budget_and_targeting(self, mock_client):
+        from openai_ads_mcp.tools_campaigns import create_campaign
+
+        await create_campaign(
+            name="Daily test",
+            budget_usd=50,
+            daily_budget_usd=5,
+            locations=["geo_us"],
+            excluded_locations=["geo_ny"],
+            custom_audience_ids=["aud_1"],
+            excluded_custom_audience_ids="aud_2,aud_3",
+            platforms=["web", "ios_app"],
+        )
+        payload = mock_client.post.call_args.kwargs["json"]
+        assert payload["budget"] == {
+            "lifetime_spend_limit_micros": 50_000_000,
+            "daily_spend_limit_micros": 5_000_000,
+        }
+        assert payload["targeting"] == {
+            "locations": {"include": [{"id": "geo_us"}]},
+            "excluded_locations": {"include": [{"id": "geo_ny"}]},
+            "custom_audiences": {"ids": ["aud_1"]},
+            "excluded_custom_audiences": {"ids": ["aud_2", "aud_3"]},
+            "platforms": {"included": ["web", "ios_app"]},
+        }
+
+    @pytest.mark.asyncio
+    async def test_daily_budget_only_and_guards(self, mock_client, monkeypatch):
+        from openai_ads_mcp.tools_campaigns import create_campaign, update_campaign
+
+        await create_campaign(name="Daily only", daily_budget_usd=5)
+        assert mock_client.post.call_args.kwargs["json"]["budget"] == {"daily_spend_limit_micros": 5_000_000}
+        mock_client.post.reset_mock()
+
+        data = json.loads(await create_campaign(name="No budget"))
+        assert data["error"] is True
+
+        monkeypatch.setenv("OPENAI_ADS_BUDGET_CEILING_USD", "10")
+        data = json.loads(await update_campaign(campaign_id="camp_1", daily_budget_usd=50))
+        assert data["error"] is True
+        assert "daily_budget_usd" in data["message"]
+        assert "confirm_budget=True" in data["message"]
+        mock_client.post.assert_not_called()
+
+        await update_campaign(campaign_id="camp_1", daily_budget_usd=50, confirm_budget=True)
+        mock_client.post.assert_called_once_with(
+            "/campaigns/camp_1",
+            json={"budget": {"daily_spend_limit_micros": 50_000_000}},
+        )
+
+    @pytest.mark.asyncio
+    async def test_campaign_rejects_unknown_platform(self, mock_client):
+        from openai_ads_mcp.tools_campaigns import update_campaign
+
+        data = json.loads(await update_campaign(campaign_id="camp_1", platforms=["tv"]))
+        assert data["error"] is True
+        mock_client.post.assert_not_called()
+
+
 class TestOpenAPIDrift:
     def test_openapi_contains_every_ads_endpoint_used(self):
         spec_path = _SERVICE_ROOT / "openapi.json"

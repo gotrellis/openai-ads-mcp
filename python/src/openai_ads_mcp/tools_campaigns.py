@@ -7,12 +7,11 @@ from ._core import *
 _CAMPAIGN_STATES = {"activate", "pause", "archive"}
 _CAMPAIGN_STATUSES = {"active", "paused", "archived"}
 _CAMPAIGN_BIDDING_TYPES = {"impressions", "clicks", "conversions"}
+_CAMPAIGN_PLATFORMS = {"ios_app", "android_app", "web", "desktop_web", "ios_web", "android_web"}
 
 
-def _locations_payload(locations: Any) -> tuple[dict[str, Any] | None, str | None]:
-    if locations is None:
-        return None, None
-    entries, err = _coerce_list(locations, "locations")
+def _locations_include(locations: Any, name: str) -> tuple[dict[str, Any] | None, str | None]:
+    entries, err = _coerce_list(locations, name)
     if err:
         return None, err
     include = []
@@ -21,17 +20,53 @@ def _locations_payload(locations: Any) -> tuple[dict[str, Any] | None, str | Non
             include.append({"id": entry})
         elif isinstance(entry, dict):
             if not entry.get("id"):
-                return None, _bad_request("Each location object must include id.")
+                return None, _bad_request(f"Each {name} object must include id.")
             include.append(entry)
         else:
-            return None, _bad_request("locations must contain location ids or objects.")
-    return {"locations": {"include": include}}, None
+            return None, _bad_request(f"{name} must contain location ids or objects.")
+    return {"include": include}, None
+
+
+def _targeting_payload(
+    locations: Any = None,
+    excluded_locations: Any = None,
+    custom_audience_ids: Any = None,
+    excluded_custom_audience_ids: Any = None,
+    platforms: Any = None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    targeting: dict[str, Any] = {}
+    for key, value in (("locations", locations), ("excluded_locations", excluded_locations)):
+        if value is not None:
+            parsed, err = _locations_include(value, key)
+            if err:
+                return None, err
+            targeting[key] = parsed
+    for key, name, value in (
+        ("custom_audiences", "custom_audience_ids", custom_audience_ids),
+        ("excluded_custom_audiences", "excluded_custom_audience_ids", excluded_custom_audience_ids),
+    ):
+        ids, err = _coerce_string_list(value, name)
+        if err:
+            return None, err
+        if ids is not None:
+            targeting[key] = {"ids": ids}
+    platform_values, err = _coerce_string_list(platforms, "platforms")
+    if err:
+        return None, err
+    if platform_values is not None:
+        if unknown := [item for item in platform_values if item not in _CAMPAIGN_PLATFORMS]:
+            return None, _bad_request(
+                f"Invalid platforms: {', '.join(unknown)}. Allowed values: {', '.join(sorted(_CAMPAIGN_PLATFORMS))}."
+            )
+        targeting["platforms"] = {"included": platform_values}
+    return targeting or None, None
 
 
 def _build_campaign_body(
     *,
     name: str | None = None,
     budget_usd: float | None = None,
+    daily_budget_usd: float | None = None,
     status: str | None = None,
     description: str | None = None,
     start_time: int | None = None,
@@ -40,6 +75,10 @@ def _build_campaign_body(
     bidding_type: str | None = None,
     conversion_event_setting_ids: Any = None,
     locations: Any = None,
+    excluded_locations: Any = None,
+    custom_audience_ids: Any = None,
+    excluded_custom_audience_ids: Any = None,
+    platforms: Any = None,
     confirm_budget: bool = False,
     create: bool = False,
 ) -> tuple[dict[str, Any] | None, str | None]:
@@ -62,12 +101,19 @@ def _build_campaign_body(
     elif create:
         body["status"] = "paused"
 
+    budget: dict[str, int] = {}
     if budget_usd is not None:
         if budget_err := _budget_guard(float(budget_usd), confirm_budget):
             return None, budget_err
-        body["budget"] = {"lifetime_spend_limit_micros": _usd_to_micros(float(budget_usd))}
+        budget["lifetime_spend_limit_micros"] = _usd_to_micros(float(budget_usd))
+    if daily_budget_usd is not None:
+        if budget_err := _budget_guard(float(daily_budget_usd), confirm_budget, "daily_budget_usd"):
+            return None, budget_err
+        budget["daily_spend_limit_micros"] = _usd_to_micros(float(daily_budget_usd))
+    if budget:
+        body["budget"] = budget
     elif create:
-        return None, _bad_request("budget_usd is required.")
+        return None, _bad_request("budget_usd or daily_budget_usd is required.")
 
     if description is not None:
         body["description"] = description
@@ -110,7 +156,13 @@ def _build_campaign_body(
             return None, _bad_request("bidding_type='conversions' requires exactly one conversion_event_setting_ids value.")
     elif create and conversion_ids is not None:
         return None, _bad_request("conversion_event_setting_ids requires bidding_type='conversions' when creating a campaign.")
-    targeting, targeting_err = _locations_payload(locations)
+    targeting, targeting_err = _targeting_payload(
+        locations,
+        excluded_locations,
+        custom_audience_ids,
+        excluded_custom_audience_ids,
+        platforms,
+    )
     if targeting_err:
         return None, targeting_err
     if targeting is not None:
@@ -164,7 +216,8 @@ async def get_campaign(campaign_id: str) -> str:
 @ads_tool(writes=True, destructive=True, open_world=True)
 async def create_campaign(
     name: str,
-    budget_usd: float,
+    budget_usd: float | None = None,
+    daily_budget_usd: float | None = None,
     status: Literal["paused"] = "paused",
     description: str | None = None,
     start_time: int | None = None,
@@ -173,6 +226,10 @@ async def create_campaign(
     bidding_type: Literal["impressions", "clicks", "conversions"] | None = None,
     conversion_event_setting_ids: Any = None,
     locations: Any = None,
+    excluded_locations: Any = None,
+    custom_audience_ids: Any = None,
+    excluded_custom_audience_ids: Any = None,
+    platforms: Any = None,
     confirm_budget: bool = False,
     idempotency_key: str | None = None,
 ) -> str:
@@ -180,7 +237,8 @@ async def create_campaign(
 
     Args:
         name: Campaign name, 3-1000 characters.
-        budget_usd: Lifetime spend limit in USD. Minimum 1.00.
+        budget_usd: Lifetime spend limit in USD. Minimum 1.00. Provide this, daily_budget_usd, or both.
+        daily_budget_usd: Daily spend limit in USD. Minimum 1.00.
         status: Must be paused. To go live, call set_campaign_state after review.
         description: Optional internal campaign description.
         start_time: Optional Unix timestamp, 2000-01-01 to 2100-01-01.
@@ -188,12 +246,17 @@ async def create_campaign(
         mode: Optional. Only product_feed is supported.
         bidding_type: impressions, clicks, or conversions. Conversion optimization requires one event setting id.
         conversion_event_setting_ids: Exactly one active standard conversion event for conversion optimization.
-        locations: Optional geo target entries for targeting.locations.include.
-        confirm_budget: Required when budget_usd exceeds OPENAI_ADS_BUDGET_CEILING_USD.
+        locations: Optional geo target ids or objects for targeting.locations.include (see search_geo).
+        excluded_locations: Optional geo target ids or objects to exclude.
+        custom_audience_ids: Optional custom audience ids to target.
+        excluded_custom_audience_ids: Optional custom audience ids to exclude.
+        platforms: Optional list of ios_app, android_app, web, desktop_web, ios_web, android_web.
+        confirm_budget: Required when budget_usd or daily_budget_usd exceeds OPENAI_ADS_BUDGET_CEILING_USD.
     """
     body, body_err = _build_campaign_body(
         name=name,
         budget_usd=budget_usd,
+        daily_budget_usd=daily_budget_usd,
         status=status,
         description=description,
         start_time=start_time,
@@ -202,6 +265,10 @@ async def create_campaign(
         bidding_type=bidding_type,
         conversion_event_setting_ids=conversion_event_setting_ids,
         locations=locations,
+        excluded_locations=excluded_locations,
+        custom_audience_ids=custom_audience_ids,
+        excluded_custom_audience_ids=excluded_custom_audience_ids,
+        platforms=platforms,
         confirm_budget=confirm_budget,
         create=True,
     )
@@ -227,31 +294,42 @@ async def update_campaign(
     campaign_id: str,
     name: str | None = None,
     budget_usd: float | None = None,
+    daily_budget_usd: float | None = None,
     status: Literal["paused", "archived"] | None = None,
     description: str | None = None,
     start_time: int | None = None,
     end_time: int | None = None,
     conversion_event_setting_ids: Any = None,
     locations: Any = None,
+    excluded_locations: Any = None,
+    custom_audience_ids: Any = None,
+    excluded_custom_audience_ids: Any = None,
+    platforms: Any = None,
     confirm_budget: bool = False,
 ) -> str:
     """Update campaign fields.
 
-    Budget changes are guarded by OPENAI_ADS_BUDGET_CEILING_USD. If you set
-    status to active here, this can start real spend, so prefer
-    set_campaign_state for explicit activation.
+    Budget changes (budget_usd lifetime, daily_budget_usd daily) are guarded by
+    OPENAI_ADS_BUDGET_CEILING_USD. Activation is not allowed here; use
+    set_campaign_state after review. bidding_type and mode cannot be changed
+    after creation. Targeting arguments match create_campaign.
     """
     if campaign_err := _validate_non_empty("campaign_id", campaign_id):
         return campaign_err
     body, body_err = _build_campaign_body(
         name=name,
         budget_usd=budget_usd,
+        daily_budget_usd=daily_budget_usd,
         status=status,
         description=description,
         start_time=start_time,
         end_time=end_time,
         conversion_event_setting_ids=conversion_event_setting_ids,
         locations=locations,
+        excluded_locations=excluded_locations,
+        custom_audience_ids=custom_audience_ids,
+        excluded_custom_audience_ids=excluded_custom_audience_ids,
+        platforms=platforms,
         confirm_budget=confirm_budget,
     )
     if body_err:
