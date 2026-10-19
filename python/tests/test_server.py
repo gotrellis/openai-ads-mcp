@@ -26,8 +26,9 @@ EXPECTED_TOOLS = [tool["name"] for tool in json.loads(_MANIFEST_PATH.read_text()
 FORK_WRITE_TOOLS = {
     "set_ad_account_state",
     "update_ad_account_brand",
-    "update_product_feed_products",
 }
+# Listed only with OPENAI_ADS_ENABLE_FEED_WRITES=1 (price unit unverified).
+FEED_WRITE_TOOLS = {"update_product_feed_products"}
 # Fork read tools: get_conversions is the read half split out of the upstream manage_conversions.
 FORK_READ_TOOLS = {"get_conversions"}
 EXPECTED_TOOLS = EXPECTED_TOOLS + sorted(FORK_WRITE_TOOLS | FORK_READ_TOOLS)
@@ -153,7 +154,7 @@ class TestToolRegistration:
         assert registered == expected
 
     def test_tool_count_is_curated(self):
-        assert len(self._tools()) == 31
+        assert len(self._tools()) == 30
 
     def test_all_tools_have_descriptions_and_annotations(self):
         for name, tool in self._tools().items():
@@ -186,14 +187,15 @@ class TestToolRegistration:
         assert "openai-ads://trakkr-visibility" in resources
         assert resources["openai-ads://trakkr-visibility"].mime_type == "text/markdown"
 
-    @pytest.mark.asyncio
-    async def test_readonly_mode_hides_writes(self):
+    @staticmethod
+    def _tools_in_subprocess(**env_overrides: str) -> dict[str, bool]:
+        """{tool name: destructive_hint} as registered in a fresh process with these env vars."""
         code = (
             "import json, openai_ads_mcp; "
-            "print(json.dumps(sorted(openai_ads_mcp.mcp._tool_manager._tools)))"
+            "print(json.dumps({n: t.annotations.destructive_hint for n, t in openai_ads_mcp.mcp._tool_manager._tools.items()}))"
         )
         env = os.environ.copy()
-        env["OPENAI_ADS_MCP_READONLY"] = "1"
+        env.update(env_overrides)
         env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
         proc = subprocess.run(
             [sys.executable, "-c", code],
@@ -203,7 +205,18 @@ class TestToolRegistration:
             capture_output=True,
             check=True,
         )
-        names = set(json.loads(proc.stdout))
+        return json.loads(proc.stdout)
+
+    def test_feed_writes_listed_only_when_enabled_and_destructive(self):
+        tools = self._tools_in_subprocess(OPENAI_ADS_ENABLE_FEED_WRITES="1")
+        assert set(tools) == set(EXPECTED_TOOLS) | FEED_WRITE_TOOLS
+        assert tools["update_product_feed_products"] is True
+        readonly = self._tools_in_subprocess(OPENAI_ADS_ENABLE_FEED_WRITES="1", OPENAI_ADS_MCP_READONLY="1")
+        assert "update_product_feed_products" not in readonly
+
+    @pytest.mark.asyncio
+    async def test_readonly_mode_hides_writes(self):
+        names = set(self._tools_in_subprocess(OPENAI_ADS_MCP_READONLY="1"))
         assert "get_account" in names
         assert "get_insights" in names
         assert "draft_context_hints" in names
@@ -546,7 +559,7 @@ class TestWriteTools:
         mock_client.post.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_upload_creative_both_modes(self, mock_client, tmp_path):
+    async def test_upload_creative_both_modes(self, mock_client, tmp_path, monkeypatch):
         from openai_ads_mcp.tools_ads import upload_creative
 
         await upload_creative(image_url="https://example.com/image.png")
@@ -554,6 +567,12 @@ class TestWriteTools:
         mock_client.post.reset_mock()
         image = tmp_path / "image.png"
         image.write_bytes(b"png")
+        monkeypatch.delenv("OPENAI_ADS_ALLOW_LOCAL_FILES", raising=False)
+        data = json.loads(await upload_creative(file_path=str(image)))
+        assert data["error"] is True
+        assert "file_content_base64" in data["message"] and "OPENAI_ADS_ALLOW_LOCAL_FILES=1" in data["message"]
+        mock_client.upload_file.assert_not_called()
+        monkeypatch.setenv("OPENAI_ADS_ALLOW_LOCAL_FILES", "1")
         await upload_creative(file_path=str(image))
         mock_client.upload_file.assert_called_once_with("/upload", str(image))
 
@@ -1295,11 +1314,16 @@ class TestAudienceUpload:
         )
 
     @pytest.mark.asyncio
-    async def test_upload_from_path_and_existing_file_id(self, mock_client, tmp_path):
+    async def test_upload_from_path_and_existing_file_id(self, mock_client, tmp_path, monkeypatch):
         from openai_ads_mcp.tools_audiences import manage_audience
 
         csv = tmp_path / "list.csv"
         csv.write_text("a@example.com\n")
+        monkeypatch.delenv("OPENAI_ADS_ALLOW_LOCAL_FILES", raising=False)
+        data = json.loads(await manage_audience(action="upload", name="From disk", identifier_type="email", file_path=str(csv)))
+        assert data["error"] is True and "OPENAI_ADS_ALLOW_LOCAL_FILES=1" in data["message"]
+        mock_client.upload_file.assert_not_called()
+        monkeypatch.setenv("OPENAI_ADS_ALLOW_LOCAL_FILES", "1")
         await manage_audience(action="upload", name="From disk", identifier_type="email", file_path=str(csv))
         mock_client.upload_file.assert_called_once_with("/uploads", str(csv), data={"purpose": "custom_audience"})
         assert mock_client.post.call_args.kwargs["json"]["file_size"] == csv.stat().st_size

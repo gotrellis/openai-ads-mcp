@@ -66,11 +66,20 @@ def _products_payload(products: Any) -> tuple[list[dict[str, Any]] | None, str |
     return out, None
 
 
-@ads_tool(writes=True, idempotent=True, open_world=True)
+# The price unit is unverified, so a wrong guess would reprice live ads 100x: off unless the operator opts in.
+@ads_tool(
+    writes=True,
+    destructive=True,
+    idempotent=True,
+    open_world=True,
+    enabled=_truthy(os.environ.get("OPENAI_ADS_ENABLE_FEED_WRITES")),
+)
 async def update_product_feed_products(feed_id: str, products: Any) -> str:
     """Patch price, title, or availability on products in a product feed.
 
     Only the fields you send change. Price changes show up in live product ads.
+    The price unit is UNVERIFIED (see products below). Listed only when the
+    server sets OPENAI_ADS_ENABLE_FEED_WRITES=1.
 
     Args:
         feed_id: Product feed id, as in an ad group's product_set.product_feed_id.

@@ -291,8 +291,9 @@ def ads_tool(
     destructive: bool = False,
     open_world: bool = False,
     idempotent: bool | None = None,
+    enabled: bool = True,
 ):
-    """Register a tool with honest MCP behavior annotations."""
+    """Register a tool with honest MCP behavior annotations. enabled=False keeps it callable but unlisted."""
     annotations = ToolAnnotations(
         read_only_hint=not writes,
         destructive_hint=destructive,
@@ -309,7 +310,7 @@ def ads_tool(
 
         wrapper.__signature__ = signature
         wrapper.__annotations__ = dict(getattr(fn, "__annotations__", {}))
-        if writes and is_readonly_mode():
+        if not enabled or (writes and is_readonly_mode()):
             return wrapper
         return mcp.tool(annotations=annotations, structured_output=False)(wrapper)
 

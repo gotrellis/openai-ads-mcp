@@ -249,7 +249,7 @@ The production runbook is in `HOSTED_DEPLOY.md`.
 
 ## Tool Surface
 
-The upstream manifest lists 27 tools. This fork's Python runtime adds `get_conversions`, `set_ad_account_state`, `update_ad_account_brand`, and `update_product_feed_products` (31 total; 13 in readonly mode).
+The upstream manifest lists 27 tools. This fork's Python runtime adds `get_conversions`, `set_ad_account_state`, `update_ad_account_brand`, and `update_product_feed_products` (30 listed by default, 31 with `OPENAI_ADS_ENABLE_FEED_WRITES=1`; 13 in readonly mode).
 
 | Group | Tools |
 | --- | --- |

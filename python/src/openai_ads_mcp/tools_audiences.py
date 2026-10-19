@@ -111,8 +111,9 @@ async def manage_audience(
     Actions:
     - upload: creates an audience from a customer list file. Requires name,
       identifier_type, and exactly one of file_id (from an earlier upload),
-      file_path (a file on the MCP server's machine), or file_content_base64
-      with filename. File sources are uploaded to /uploads first, then the
+      file_content_base64 with filename, or file_path (a file on the MCP
+      server's machine; only when the server sets OPENAI_ADS_ALLOW_LOCAL_FILES=1).
+      File sources are uploaded to /uploads first, then the
       audience is created from the returned file_id. mimetype defaults to a
       guess from the filename, else text/csv.
     - archive: requires audience_id.
@@ -130,6 +131,8 @@ async def manage_audience(
                 return type_err
             if sum(bool(value) for value in (file_id, file_path, file_content_base64)) != 1:
                 return _bad_request("Provide exactly one of file_id, file_path, or file_content_base64.")
+            if file_err := _local_file_guard(file_path, "file_content_base64 with filename, or file_id"):
+                return file_err
             if file_size is not None and file_size < 1:
                 return _bad_request("file_size must be at least 1.")
             if file_id:

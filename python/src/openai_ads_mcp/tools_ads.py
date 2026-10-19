@@ -155,14 +155,17 @@ async def upload_creative(
 ) -> str:
     """Upload a creative image and receive a file_id.
 
-    Provide exactly one of image_url, file_path, or file_content_base64.
-    image_url is sent as JSON to /upload. file_path (a file on the MCP server's
-    machine) and file_content_base64 (raw image bytes, base64-encoded, with
-    filename such as hero.png) are sent as multipart/form-data. Set
+    Provide exactly one of image_url, file_content_base64, or file_path.
+    image_url is sent as JSON to /upload. file_content_base64 (raw image bytes,
+    base64-encoded, with filename such as hero.png) is sent as
+    multipart/form-data. file_path (a file on the MCP server's machine) only
+    works when the server sets OPENAI_ADS_ALLOW_LOCAL_FILES=1. Set
     purpose='account_favicon' when the image is for update_ad_account_brand.
     """
     if sum(bool(value) for value in (image_url, file_path, file_content_base64)) != 1:
         return _bad_request("Provide exactly one of image_url, file_path, or file_content_base64.")
+    if file_err := _local_file_guard(file_path, "file_content_base64 with filename, or image_url"):
+        return file_err
     content = None
     if file_content_base64:
         if filename_err := _validate_non_empty("filename", filename, maximum=255):
