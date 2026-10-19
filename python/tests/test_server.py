@@ -340,6 +340,25 @@ class TestInsights:
         mock_client.get.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_get_insights_multiple_time_ranges(self, mock_client):
+        from openai_ads_mcp.tools_insights import get_insights
+
+        ranges = [
+            {"type": "unix_range", "start": 1764547200, "end": 1765152000},
+            '{"type":"unix_range","start":1765152000,"end":1765756800}',
+        ]
+        await get_insights(scope="account", time_ranges=ranges)
+        params = mock_client.get.call_args.kwargs["params"]
+        assert [json.loads(item)["start"] for item in params["time_ranges"]] == [1764547200, 1765152000]
+
+        mock_client.get.reset_mock()
+        data = json.loads(await get_insights(scope="account", time_range=ranges[0], time_ranges=ranges))
+        assert data["error"] is True
+        data = json.loads(await get_insights(scope="account", time_ranges=[]))
+        assert data["error"] is True
+        mock_client.get.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_get_insights_requires_entity_id(self, mock_client):
         from openai_ads_mcp.tools_insights import get_insights
 
