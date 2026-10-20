@@ -227,6 +227,34 @@ class TestToolRegistration:
         assert not (names & EXPECTED_WRITE_TOOLS)
         assert len(names) == 13
 
+    def test_write_allowlist_limits_registered_writes(self):
+        names = set(self._tools_in_subprocess(OPENAI_ADS_MCP_TOOLS="set_campaign_state,update_ad"))
+        read_tools = (set(EXPECTED_TOOLS) | FEED_WRITE_TOOLS) - EXPECTED_WRITE_TOOLS - FEED_WRITE_TOOLS
+        assert names == read_tools | {"set_campaign_state", "update_ad"}
+        assert "create_campaign" not in names
+
+    def test_readonly_wins_over_allowlist(self):
+        names = set(self._tools_in_subprocess(OPENAI_ADS_MCP_READONLY="1", OPENAI_ADS_MCP_TOOLS="update_ad"))
+        assert not (names & EXPECTED_WRITE_TOOLS)
+
+    @pytest.mark.asyncio
+    async def test_ceilings_off(self, mock_client, monkeypatch):
+        from openai_ads_mcp.tools_adgroups import update_ad_group
+        from openai_ads_mcp.tools_campaigns import update_campaign
+
+        monkeypatch.setenv("OPENAI_ADS_BUDGET_CEILING", "OFF")
+        monkeypatch.setenv("OPENAI_ADS_BID_CEILING", "Off")
+        await update_campaign(campaign_id="c1", daily_budget=5000)
+        assert mock_client.post.call_args.kwargs["json"]["budget"]["daily_spend_limit_micros"] == 5_000_000_000
+        mock_client.post.reset_mock()
+        data = json.loads(await update_ad_group(ad_group_id="ag1", billing_event="click", max_bid=999))
+        assert "error" not in data
+        mock_client.post.assert_called_once()
+        mock_client.post.reset_mock()
+        data = json.loads(await update_campaign(campaign_id="c1", lifetime_budget=0.5))
+        assert data["error"] is True
+        mock_client.post.assert_not_called()
+
 
 class TestReadTools:
     @pytest.mark.asyncio

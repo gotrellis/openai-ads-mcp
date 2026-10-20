@@ -97,8 +97,9 @@ Optional environment variables:
 | `OPENAI_ADS_API_KEY` | Required bearer key for `https://api.ads.openai.com/v1`. |
 | `OPENAI_ADS_API_BASE_URL` | Optional HTTPS override for tests or proxies. |
 | `OPENAI_ADS_MCP_READONLY` | Set to `1` or `true` to register read tools only. |
-| `OPENAI_ADS_BUDGET_CEILING` | Optional total-spend guard, in the ad account's currency (major units). Default `100`. Falls back to the legacy `OPENAI_ADS_BUDGET_CEILING_USD` (logs a deprecation warning). |
-| `OPENAI_ADS_BID_CEILING` | Optional bid guard, in the ad account's currency (major units). Default `10`. A higher `max_bid` needs `confirm_bid=True`. |
+| `OPENAI_ADS_MCP_TOOLS` | Comma-separated write tool names. When set, only those write tools are registered (read tools always are). `OPENAI_ADS_MCP_READONLY` still wins. |
+| `OPENAI_ADS_BUDGET_CEILING` | Optional total-spend guard, in the ad account's currency (major units). Default `100`. Falls back to the legacy `OPENAI_ADS_BUDGET_CEILING_USD` (logs a deprecation warning). `off` (any case) removes the ceiling and the `end_time` rule; the amount must still be finite and at least `1`. |
+| `OPENAI_ADS_BID_CEILING` | Optional bid guard, in the ad account's currency (major units). Default `10`. A higher `max_bid` needs `confirm_bid=True`. `off` (any case) removes the ceiling. |
 | `OPENAI_ADS_ALLOW_LOCAL_FILES` | Set to `1` to let `upload_creative` and `manage_audience` read `file_path` from the server's disk. Off by default; send `file_content_base64` (or `image_url` / `file_id`) instead. |
 | `OPENAI_ADS_ENABLE_FEED_WRITES` | Set to `1` to list `update_product_feed_products`. Off by default because the feed price unit is unverified. |
 

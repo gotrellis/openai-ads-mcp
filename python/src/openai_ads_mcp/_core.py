@@ -35,6 +35,18 @@ def is_readonly_mode() -> bool:
     return _truthy(os.environ.get("OPENAI_ADS_MCP_READONLY"))
 
 
+def _write_allowlist() -> set[str] | None:
+    """Write tools to register (OPENAI_ADS_MCP_TOOLS, comma-separated); None means all of them."""
+    raw = os.environ.get("OPENAI_ADS_MCP_TOOLS")
+    if raw is None:
+        return None
+    return {name.strip() for name in raw.split(",") if name.strip()}
+
+
+def _ceiling_off(env_name: str) -> bool:
+    return os.environ.get(env_name, "").strip().lower() == "off"
+
+
 def _positive_float_env(raw: str | None, default: float) -> float:
     try:
         value = float((raw or "").strip())
@@ -53,6 +65,8 @@ def _warn_legacy_budget_ceiling() -> None:
 
 def _budget_ceiling() -> float:
     """Ceiling in the ad account's currency (major units). Falls back to the legacy _USD env name."""
+    if _ceiling_off("OPENAI_ADS_BUDGET_CEILING"):
+        return math.inf
     raw = os.environ.get("OPENAI_ADS_BUDGET_CEILING")
     if raw is None and (raw := os.environ.get("OPENAI_ADS_BUDGET_CEILING_USD")) is not None:
         _warn_legacy_budget_ceiling()
@@ -61,6 +75,8 @@ def _budget_ceiling() -> float:
 
 def _bid_ceiling() -> float:
     """Max bid allowed without confirm_bid, in the ad account's currency (major units)."""
+    if _ceiling_off("OPENAI_ADS_BID_CEILING"):
+        return math.inf
     return _positive_float_env(os.environ.get("OPENAI_ADS_BID_CEILING"), 10.0)
 
 
@@ -310,7 +326,8 @@ def ads_tool(
 
         wrapper.__signature__ = signature
         wrapper.__annotations__ = dict(getattr(fn, "__annotations__", {}))
-        if not enabled or (writes and is_readonly_mode()):
+        allow = _write_allowlist()
+        if not enabled or (writes and (is_readonly_mode() or (allow is not None and fn.__name__ not in allow))):
             return wrapper
         return mcp.tool(annotations=annotations, structured_output=False)(wrapper)
 
@@ -474,7 +491,7 @@ def _daily_budget_guard(
     """A daily budget is safe without confirmation only when it can't total more than the ceiling by end_time."""
     if err := _budget_guard(amount, True, "daily_budget"):
         return err
-    if confirm_budget:
+    if confirm_budget or _ceiling_off("OPENAI_ADS_BUDGET_CEILING"):
         return None
     ceiling = _budget_ceiling()
     if end_time is None:
