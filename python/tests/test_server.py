@@ -26,11 +26,13 @@ EXPECTED_TOOLS = [tool["name"] for tool in json.loads(_MANIFEST_PATH.read_text()
 FORK_WRITE_TOOLS = {
     "set_ad_account_state",
     "update_ad_account_brand",
+    "set_daily_spend_limit",
+    "remove_daily_spend_limit",
 }
 # Listed only with OPENAI_ADS_ENABLE_FEED_WRITES=1 (price unit unverified).
 FEED_WRITE_TOOLS = {"update_product_feed_products"}
 # Fork read tools: get_conversions is the read half split out of the upstream manage_conversions.
-FORK_READ_TOOLS = {"get_conversions", "get_ad_preview"}
+FORK_READ_TOOLS = {"get_conversions", "get_ad_preview", "get_spend_limits"}
 EXPECTED_TOOLS = EXPECTED_TOOLS + sorted(FORK_WRITE_TOOLS | FORK_READ_TOOLS)
 
 EXPECTED_WRITE_TOOLS = {
@@ -59,6 +61,8 @@ EXPECTED_DESTRUCTIVE_TOOLS = {
     "manage_audience",
     "build_campaign",
     "set_ad_account_state",
+    "set_daily_spend_limit",
+    "remove_daily_spend_limit",
 }
 EXPECTED_OPEN_WORLD_TOOLS = {
     "get_account",
@@ -94,6 +98,9 @@ USED_OPENAI_ADS_PATHS = {
     "/ad_account/activate",
     "/ad_account/pause",
     "/ad_account/brand",
+    "/ad_account/spend_limit_windows",
+    "/ad_account/daily_spend_limit",
+    "/ad_account/daily_spend_limit/delete",
     "/ad_account/insights",
     "/campaigns",
     "/campaigns/{campaign_id}",
@@ -155,7 +162,7 @@ class TestToolRegistration:
         assert registered == expected
 
     def test_tool_count_is_curated(self):
-        assert len(self._tools()) == 31
+        assert len(self._tools()) == 34
 
     def test_all_tools_have_descriptions_and_annotations(self):
         for name, tool in self._tools().items():
@@ -227,7 +234,7 @@ class TestToolRegistration:
         assert "manage_conversions" not in names
         assert not (names & EXPECTED_WRITE_TOOLS)
         assert "get_ad_preview" in names
-        assert len(names) == 14
+        assert len(names) == 15
 
     def test_preview_listed_in_readonly(self):
         assert "get_ad_preview" in self._tools_in_subprocess(OPENAI_ADS_MCP_READONLY="1")
@@ -301,6 +308,77 @@ class TestReadTools:
         result = json.loads(await get_ad_preview("ad_1"))
         assert result == {"type": "openai_ads_ad_preview", "ad_id": "ad_1", "body": "<html>x</html>"}
         mock_client.post.assert_called_once_with("/ads/ad_1/preview", write=False)
+
+    @pytest.mark.asyncio
+    async def test_set_daily_spend_limit_reads_revision_then_posts(self, mock_client):
+        from openai_ads_mcp.tools_spend_limits import set_daily_spend_limit
+
+        mock_client.get.return_value = {"revision": 7, "daily_limit": {"window_id": "w1"}}
+        mock_client.post.return_value = {"ok": True}
+        await set_daily_spend_limit(500, end_date="2026-12-31")
+        mock_client.get.assert_called_once_with("/ad_account/spend_limit_windows")
+        assert mock_client.post.call_args.args == ("/ad_account/daily_spend_limit",)
+        assert mock_client.post.call_args.kwargs["json"] == {
+            "amount_micros": 500_000_000,
+            "expected_revision": 7,
+            "window_id": "w1",
+            "end_date": "2026-12-31",
+        }
+
+    @pytest.mark.asyncio
+    async def test_set_daily_spend_limit_first_time(self, mock_client):
+        from openai_ads_mcp.tools_spend_limits import set_daily_spend_limit
+
+        mock_client.get.return_value = {"revision": 0}
+        await set_daily_spend_limit(500)
+        assert mock_client.post.call_args.kwargs["json"] == {"amount_micros": 500_000_000, "expected_revision": 0}
+
+    @pytest.mark.asyncio
+    async def test_set_daily_spend_limit_validates_input(self, mock_client):
+        from openai_ads_mcp.tools_spend_limits import set_daily_spend_limit
+
+        assert json.loads(await set_daily_spend_limit(-1))["error"] is True
+        assert json.loads(await set_daily_spend_limit(float("nan")))["error"] is True
+        assert "YYYY-MM-DD" in json.loads(await set_daily_spend_limit(5, end_date="12/31/2026"))["message"]
+        mock_client.get.assert_not_called()
+        mock_client.post.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_remove_daily_spend_limit_posts_window(self, mock_client):
+        from openai_ads_mcp.tools_spend_limits import remove_daily_spend_limit
+
+        mock_client.get.return_value = {"revision": 3, "daily_limit": {"window_id": "w1"}}
+        await remove_daily_spend_limit()
+        mock_client.post.assert_called_once_with(
+            "/ad_account/daily_spend_limit/delete", json={"expected_revision": 3, "window_id": "w1"}
+        )
+
+    @pytest.mark.asyncio
+    async def test_remove_daily_spend_limit_none_to_remove(self, mock_client):
+        from openai_ads_mcp.tools_spend_limits import remove_daily_spend_limit
+
+        mock_client.get.return_value = {"revision": 3}
+        result = json.loads(await remove_daily_spend_limit())
+        assert result["error"] is True
+        mock_client.post.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_get_spend_limits_returns_response(self, mock_client):
+        from openai_ads_mcp.tools_spend_limits import get_spend_limits
+
+        mock_client.get.return_value = {"revision": 2, "daily_limit": None}
+        assert json.loads(await get_spend_limits()) == {"revision": 2}
+        mock_client.get.assert_called_once_with("/ad_account/spend_limit_windows")
+
+    @pytest.mark.asyncio
+    async def test_spend_limit_api_refusal_surfaces_reason(self, mock_client):
+        from openai_ads_mcp.tools_spend_limits import set_daily_spend_limit
+
+        mock_client.get.return_value = {"revision": 1}
+        mock_client.post.side_effect = OpenAIAdsAPIError(403, "Postpaid invoice billing is required")
+        result = json.loads(await set_daily_spend_limit(100))
+        assert result["error"] is True
+        assert "invoice" in result["message"]
 
     @pytest.mark.asyncio
     async def test_ad_reads(self, mock_client):
