@@ -30,7 +30,7 @@ FORK_WRITE_TOOLS = {
 # Listed only with OPENAI_ADS_ENABLE_FEED_WRITES=1 (price unit unverified).
 FEED_WRITE_TOOLS = {"update_product_feed_products"}
 # Fork read tools: get_conversions is the read half split out of the upstream manage_conversions.
-FORK_READ_TOOLS = {"get_conversions"}
+FORK_READ_TOOLS = {"get_conversions", "get_ad_preview"}
 EXPECTED_TOOLS = EXPECTED_TOOLS + sorted(FORK_WRITE_TOOLS | FORK_READ_TOOLS)
 
 EXPECTED_WRITE_TOOLS = {
@@ -113,6 +113,7 @@ USED_OPENAI_ADS_PATHS = {
     "/ads/{ad_id}/pause",
     "/ads/{ad_id}/archive",
     "/ads/{ad_id}/insights",
+    "/ads/{ad_id}/preview",
     "/upload",
     "/custom_audiences",
     "/custom_audiences/{custom_audience_id}",
@@ -154,7 +155,7 @@ class TestToolRegistration:
         assert registered == expected
 
     def test_tool_count_is_curated(self):
-        assert len(self._tools()) == 30
+        assert len(self._tools()) == 31
 
     def test_all_tools_have_descriptions_and_annotations(self):
         for name, tool in self._tools().items():
@@ -225,7 +226,11 @@ class TestToolRegistration:
         assert "get_conversions" in names
         assert "manage_conversions" not in names
         assert not (names & EXPECTED_WRITE_TOOLS)
-        assert len(names) == 13
+        assert "get_ad_preview" in names
+        assert len(names) == 14
+
+    def test_preview_listed_in_readonly(self):
+        assert "get_ad_preview" in self._tools_in_subprocess(OPENAI_ADS_MCP_READONLY="1")
 
     def test_write_allowlist_limits_registered_writes(self):
         names = set(self._tools_in_subprocess(OPENAI_ADS_MCP_TOOLS="set_campaign_state,update_ad"))
@@ -287,6 +292,15 @@ class TestReadTools:
         mock_client.get.reset_mock()
         await get_ad_group("ag_1")
         mock_client.get.assert_called_once_with("/ad_groups/ag_1")
+
+    @pytest.mark.asyncio
+    async def test_get_ad_preview_posts_and_tags_type(self, mock_client):
+        from openai_ads_mcp.tools_ads import get_ad_preview
+
+        mock_client.post.return_value = {"data": [{"body": "<html>x</html>"}]}
+        result = json.loads(await get_ad_preview("ad_1"))
+        assert result == {"type": "openai_ads_ad_preview", "ad_id": "ad_1", "body": "<html>x</html>"}
+        mock_client.post.assert_called_once_with("/ads/ad_1/preview", write=False)
 
     @pytest.mark.asyncio
     async def test_ad_reads(self, mock_client):
@@ -1542,6 +1556,18 @@ class TestReviewFixes:
         set_handler(timeout)
         with pytest.raises(ToolError, match=r"\(HTTP 504\): Request timed out.*The write may have succeeded"):
             await update_campaign(campaign_id="camp_1", name="New name")
+
+    @pytest.mark.asyncio
+    async def test_preview_503_is_not_labelled_a_write(self, real_client):
+        from mcp.server.mcpserver.exceptions import ToolError
+
+        from openai_ads_mcp.tools_ads import get_ad_preview
+
+        _, set_handler = real_client
+        set_handler(lambda request: httpx.Response(503, request=request))
+        with pytest.raises(ToolError) as excinfo:
+            await get_ad_preview("ad_1")
+        assert "may have succeeded" not in str(excinfo.value)
 
     def test_api_reason_reads_string_error(self):
         from openai_ads_mcp.client import _api_reason

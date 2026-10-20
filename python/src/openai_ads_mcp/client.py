@@ -111,8 +111,8 @@ class OpenAIAdsClient:
     async def get(self, path: str, params: dict | None = None) -> dict:
         return await self._request(self._client, "GET", path, params=params)
 
-    async def post(self, path: str, json: dict | None = None, idempotency_key: str | None = None) -> dict:
-        return await self._request(self._client, "POST", path, json=json, idempotency_key=idempotency_key)
+    async def post(self, path: str, json: dict | None = None, idempotency_key: str | None = None, *, write: bool = True) -> dict:
+        return await self._request(self._client, "POST", path, json=json, idempotency_key=idempotency_key, write=write)
 
     async def patch(self, path: str, json: dict | None = None) -> dict:
         return await self._request(self._client, "PATCH", path, json=json)
@@ -149,10 +149,12 @@ class OpenAIAdsClient:
         data: dict | None = None,
         redact_detail: bool = False,
         idempotency_key: str | None = None,
+        write: bool | None = None,
     ) -> dict:
         if reason := _unsafe_path_reason(path):
             raise OpenAIAdsAPIError(400, f"Refused to send {method} {path!r}: ids in the path {reason}. Nothing was sent.")
-        write = method != "GET"
+        if write is None:
+            write = method != "GET"
         try:
             headers = {"Idempotency-Key": idempotency_key} if idempotency_key else None
             resp = await client.request(method, path.lstrip("/"), params=_encode_query(params), json=json, files=files, data=data, headers=headers)

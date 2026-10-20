@@ -145,6 +145,24 @@ async def get_ad(ad_id: str) -> str:
         return _err(e)
 
 
+@ads_tool(open_world=True)
+async def get_ad_preview(ad_id: str) -> str:
+    """Show how an existing ad will look in ChatGPT (temporary preview)."""
+    if ad_err := _validate_non_empty("ad_id", ad_id):
+        return ad_err
+    client, client_err = _get_client_or_error()
+    if client_err:
+        return client_err
+    try:
+        # A POST that only reads: write=False keeps 5xx/timeouts from saying "the write may have succeeded".
+        resp = await client.post(f"/ads/{ad_id}/preview", write=False)
+        data = resp.get("data") if isinstance(resp, dict) else None
+        body = data[0].get("body") if isinstance(data, list) and data and isinstance(data[0], dict) else None
+        return _ok({"type": "openai_ads_ad_preview", "ad_id": ad_id, "body": body})
+    except OpenAIAdsAPIError as e:
+        return _err(e)
+
+
 @ads_tool(writes=True, open_world=True)
 async def upload_creative(
     image_url: str | None = None,
@@ -320,6 +338,7 @@ async def set_ad_state(ad_id: str, state: Literal["activate", "pause", "archive"
 __all__ = (
     "list_ads",
     "get_ad",
+    "get_ad_preview",
     "upload_creative",
     "create_ad",
     "update_ad",
