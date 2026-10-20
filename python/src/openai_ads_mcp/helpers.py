@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from ._core import *
 from .tools_adgroups import _build_ad_group_body
-from .tools_ads import _build_ad_body, _image_source, _upload_image_url
+from .tools_ads import _build_ad_body, _image_source, _upload_image
 from .tools_campaigns import _build_campaign_body
 
 
@@ -47,7 +47,8 @@ async def build_campaign(
     maximize_conversions. It may include description, bidding_strategy,
     custom_audience_bid_multipliers, context_hints, and product_set. ads must be
     a list of objects accepted by create_ad: name, creative_type, title, body,
-    target_url, file_id or image_url (a public https image, uploaded only after
+    target_url, one image (file_id; image_url, a public https image; or
+    image_base64 + image_filename, the image bytes — an upload happens only after
     every body validates and before anything is created), and optional price.
     budget_usd was renamed to
     lifetime_budget and is refused.
@@ -105,10 +106,13 @@ async def build_campaign(
     if ad_group_err:
         return ad_group_err
     ad_bodies = []
+    image_uploads = []
     for index, ad in enumerate(ad_payloads):
         if not isinstance(ad, dict):
             return _bad_request(f"ads[{index}] must be an object.")
-        file_id, image_err = _image_source(ad.get("file_id"), ad.get("image_url"))
+        file_id, image_upload, image_err = _image_source(
+            ad.get("file_id"), ad.get("image_url"), ad.get("image_base64"), ad.get("image_filename")
+        )
         if image_err:
             return _bad_request(f"ads[{index}]: {json.loads(image_err)['message']}")
         ad_body, ad_err = _build_ad_body(
@@ -129,6 +133,7 @@ async def build_campaign(
         # serves until the campaign is activated, and that single step takes the tree live.
         ad_body["status"] = "active"
         ad_bodies.append(ad_body)
+        image_uploads.append(image_upload)
     ad_group_body["status"] = "active"
     client, client_err = _get_client_or_error()
     if client_err:
@@ -136,9 +141,9 @@ async def build_campaign(
     created: dict[str, Any] = {"campaign": None, "ad_group": None, "ads": []}
     try:
         # Images first: an upload that fails leaves nothing created.
-        for index, ad in enumerate(ad_payloads):
-            if ad.get("image_url"):
-                uploaded = await _upload_image_url(client, ad["image_url"])
+        for index, image_upload in enumerate(image_uploads):
+            if image_upload:
+                uploaded = await _upload_image(client, image_upload)
                 if not uploaded:
                     return _bad_request(f"ads[{index}]: the image upload returned no file_id; nothing was created.")
                 ad_bodies[index]["creative"]["file_id"] = uploaded

@@ -870,9 +870,37 @@ class TestHelpers:
             name="Image test", lifetime_budget=50, ad_group={"name": "Buyers", "billing_event": "click", "max_bid": 1.5},
             ads=[{**base, "file_id": "f", "image_url": "https://cdn.example.com/a.png"}],
         ))
-        assert both["error"] is True and "not both" in both["message"]
+        assert both["error"] is True and "only one of" in both["message"]
         plain = json.loads(await create_ad(ad_group_id="ag_1", image_url="http://cdn.example.com/a.png", **base))
         assert plain["error"] is True and "https" in plain["message"]
+        mock_client.post.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_image_bytes_are_uploaded_before_creating(self, mock_client):
+        from openai_ads_mcp.helpers import build_campaign
+        from openai_ads_mcp.tools_ads import create_ad
+
+        mock_client.upload_bytes = AsyncMock(return_value={"file_id": "file_bytes"})
+        mock_client.post = AsyncMock(side_effect=[{"id": "camp_1"}, {"id": "ag_1"}, {"id": "ad_1"}])
+        ad = {
+            "name": "Variant A",
+            "creative_type": "chat_card",
+            "title": "Find your AI gaps",
+            "body": "Track your brand in AI answers.",
+            "target_url": "https://trakkr.ai",
+            "image_base64": "cG5n",
+            "image_filename": "rug.png",
+        }
+        await build_campaign(
+            name="Bytes test", lifetime_budget=50,
+            ad_group={"name": "Buyers", "billing_event": "click", "max_bid": 1.5}, ads=[ad],
+        )
+        mock_client.upload_bytes.assert_called_once_with("/upload", "rug.png", b"png")
+        assert mock_client.post.call_args_list[2].kwargs["json"]["creative"]["file_id"] == "file_bytes"
+
+        mock_client.post = AsyncMock()
+        bad = json.loads(await create_ad(ad_group_id="ag_1", **{**ad, "image_base64": "not base64!"}))
+        assert bad["error"] is True and "base64" in bad["message"]
         mock_client.post.assert_not_called()
 
     @pytest.mark.asyncio

@@ -213,21 +213,40 @@ async def upload_creative(
 
 _PENDING_FILE = "pending_upload"
 
-
-def _image_source(file_id: str | None, image_url: str | None) -> tuple[str | None, str | None]:
-    """The file_id to validate the creative with: the one given, or a placeholder the upload fills."""
-    if file_id and image_url:
-        return None, _bad_request("Pass file_id or image_url, not both.")
-    if image_url is None:
-        return file_id, None
-    if not isinstance(image_url, str) or not image_url.startswith("https://"):
-        return None, _bad_request("image_url must be a public https URL.")
-    return _PENDING_FILE, None
+#: What to upload before a create: ("url", image_url) or ("bytes", filename, content).
+ImageUpload = tuple
 
 
-async def _upload_image_url(client: OpenAIAdsClient, image_url: str) -> str | None:
-    """Upload an image by URL (OpenAI fetches it) and return its file_id."""
-    return _extract_id(await client.post("/upload", json={"image_url": image_url}), "file_id", "id")
+def _image_source(
+    file_id: str | None,
+    image_url: str | None,
+    image_base64: str | None = None,
+    image_filename: str | None = None,
+) -> tuple[str | None, ImageUpload | None, str | None]:
+    """(file_id to validate with, what to upload first, error). An upload's file_id is a placeholder."""
+    if sum(bool(v) for v in (file_id, image_url, image_base64)) > 1:
+        return None, None, _bad_request("Pass only one of file_id, image_url or image_base64.")
+    if image_url is not None:
+        if not isinstance(image_url, str) or not image_url.startswith("https://"):
+            return None, None, _bad_request("image_url must be a public https URL.")
+        return _PENDING_FILE, ("url", image_url), None
+    if image_base64 is not None:
+        if name_err := _validate_non_empty("image_filename", image_filename, maximum=255):
+            return None, None, name_err
+        content, content_err = _decode_base64(image_base64, "image_base64")
+        if content_err:
+            return None, None, content_err
+        return _PENDING_FILE, ("bytes", image_filename.strip(), content), None
+    return file_id, None, None
+
+
+async def _upload_image(client: OpenAIAdsClient, upload: ImageUpload) -> str | None:
+    """Upload an image (OpenAI fetches a URL; bytes go as multipart) and return its file_id."""
+    if upload[0] == "url":
+        resp = await client.post("/upload", json={"image_url": upload[1]})
+    else:
+        resp = await client.upload_bytes("/upload", upload[1], upload[2])
+    return _extract_id(resp, "file_id", "id")
 
 
 @ads_tool(writes=True, open_world=True)
@@ -243,18 +262,21 @@ async def create_ad(
     status: Literal["paused"] = "paused",
     idempotency_key: str | None = None,
     image_url: str | None = None,
+    image_base64: str | None = None,
+    image_filename: str | None = None,
 ) -> str:
     """Create a paused ad.
 
-    chat_card creatives require target_url and an image: file_id, or image_url (a public https
-    image, uploaded only after every other field passes validation). product_ad_template
+    chat_card creatives require target_url and one image: file_id, image_url (a public https
+    image), or image_base64 + image_filename (the image bytes). An image_url or image_base64 is
+    uploaded only after every other field passes validation. product_ad_template
     creatives use the same title/body fields and may include price.
     target_url must be on the ad account's own website domain until the
     account's verification is approved; the API otherwise rejects it with
     "Account verification must be approved before using a different ad URL".
     idempotency_key is optional; a fresh one is generated when omitted.
     """
-    file_id, image_err = _image_source(file_id, image_url)
+    file_id, image_upload, image_err = _image_source(file_id, image_url, image_base64, image_filename)
     if image_err:
         return image_err
     payload, payload_err = _build_ad_body(
@@ -278,8 +300,8 @@ async def create_ad(
     if client_err:
         return client_err
     try:
-        if image_url:
-            uploaded = await _upload_image_url(client, image_url)
+        if image_upload:
+            uploaded = await _upload_image(client, image_upload)
             if not uploaded:
                 return _bad_request("The image upload returned no file_id; nothing was created.")
             payload["creative"]["file_id"] = uploaded
