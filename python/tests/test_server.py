@@ -363,6 +363,42 @@ class TestReadTools:
         mock_client.post.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_spend_limit_uses_single_rule_from_daily_limits(self, mock_client):
+        from openai_ads_mcp.tools_spend_limits import set_daily_spend_limit
+
+        mock_client.get.return_value = {"revision": 4, "daily_limits": [{"window_id": "w9"}]}
+        await set_daily_spend_limit(10)
+        assert mock_client.post.call_args.kwargs["json"]["window_id"] == "w9"
+
+    @pytest.mark.asyncio
+    async def test_spend_limit_refuses_when_multiple_rules(self, mock_client):
+        from openai_ads_mcp.tools_spend_limits import remove_daily_spend_limit, set_daily_spend_limit
+
+        mock_client.get.return_value = {
+            "revision": 4,
+            "daily_limits": [
+                {"window_id": "w1", "amount_micros": 5_000_000, "start_date": "2026-11-01", "status": "active"},
+                {"window_id": "w2", "amount_micros": 7_000_000, "start_date": "2026-12-01", "status": "upcoming"},
+            ],
+        }
+        for result in (await set_daily_spend_limit(10), await remove_daily_spend_limit()):
+            message = json.loads(result)["message"]
+            assert "w1" in message and "w2" in message and "one" in message
+        mock_client.post.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_set_daily_spend_limit_recreate_sends_start_date(self, mock_client):
+        from openai_ads_mcp.tools_spend_limits import set_daily_spend_limit
+
+        mock_client.get.return_value = {"revision": 5, "earliest_daily_start_date": "2026-11-02"}
+        await set_daily_spend_limit(10)
+        assert mock_client.post.call_args.kwargs["json"] == {
+            "amount_micros": 10_000_000,
+            "expected_revision": 5,
+            "start_date": "2026-11-02",
+        }
+
+    @pytest.mark.asyncio
     async def test_get_spend_limits_returns_response(self, mock_client):
         from openai_ads_mcp.tools_spend_limits import get_spend_limits
 

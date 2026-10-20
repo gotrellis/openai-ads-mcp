@@ -2,11 +2,32 @@
 
 from __future__ import annotations
 
+import math
 import re
+from typing import Any
 
 from ._core import *
 
 _DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def _rules(current: dict[str, Any]) -> list[dict[str, Any]]:
+    """Active and upcoming daily rules; falls back to the singleton daily_limit."""
+    rules = current.get("daily_limits")
+    if rules is None:
+        rules = [current["daily_limit"]] if current.get("daily_limit") else []
+    return [r for r in rules if isinstance(r, dict)]
+
+
+def _ambiguous(rules: list[dict[str, Any]]) -> str:
+    listing = "; ".join(
+        f"window_id={r.get('window_id')} amount={(r.get('amount_micros') or 0) / 1_000_000:g} "
+        f"start_date={r.get('start_date')} status={r.get('status')}"
+        for r in rules
+    )
+    return _bad_request(
+        f"This account has {len(rules)} daily spend limit rules ({listing}). Only one can be changed at a time."
+    )
 
 
 @ads_tool(open_world=True)
@@ -41,9 +62,16 @@ async def set_daily_spend_limit(amount: float, end_date: str | None = None) -> s
         return client_err
     try:
         current = await client.get("/ad_account/spend_limit_windows")
+        rules = _rules(current)
+        if len(rules) > 1:
+            return _ambiguous(rules)
+        # revision can be absent because _compact drops nulls; the spec says to use 0 then.
         body: dict[str, Any] = {"amount_micros": _to_micros(amount), "expected_revision": current.get("revision", 0)}
-        if window_id := (current.get("daily_limit") or {}).get("window_id"):
-            body["window_id"] = window_id
+        if rules and rules[0].get("window_id"):
+            body["window_id"] = rules[0]["window_id"]
+        elif current.get("earliest_daily_start_date"):
+            # Recreating a removed or expired limit requires a start_date.
+            body["start_date"] = current["earliest_daily_start_date"]
         if end_date:
             body["end_date"] = end_date
         return _ok(await client.post("/ad_account/daily_spend_limit", json=body))
@@ -62,10 +90,12 @@ async def remove_daily_spend_limit() -> str:
         return client_err
     try:
         current = await client.get("/ad_account/spend_limit_windows")
-        window_id = (current.get("daily_limit") or {}).get("window_id")
-        if not window_id:
+        rules = _rules(current)
+        if len(rules) > 1:
+            return _ambiguous(rules)
+        if not rules or not rules[0].get("window_id"):
             return _bad_request("This account has no daily spend limit to remove.")
-        body = {"expected_revision": current.get("revision", 0), "window_id": window_id}
+        body = {"expected_revision": current.get("revision", 0), "window_id": rules[0]["window_id"]}
         return _ok(await client.post("/ad_account/daily_spend_limit/delete", json=body))
     except OpenAIAdsAPIError as e:
         return _err(e)
