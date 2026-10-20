@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from ._core import *
 from .tools_adgroups import _build_ad_group_body
-from .tools_ads import _build_ad_body
+from .tools_ads import _build_ad_body, _image_source, _upload_image_url
 from .tools_campaigns import _build_campaign_body
 
 
@@ -26,9 +26,11 @@ async def build_campaign(
     idempotency_key: str | None = None,
     budget_usd: float | None = None,
 ) -> str:
-    """Build a complete paused campaign tree in one guarded workflow.
+    """Build a complete campaign tree in one guarded workflow.
 
-    Creates one campaign, one ad group, and N ads. Everything is created paused.
+    Creates one campaign, one ad group, and N ads. The campaign is created paused; its ad group
+    and ads are created active under it, so nothing serves until the campaign is activated with
+    set_campaign_state, and that one step takes the whole tree live.
     Every body is validated before the first request; if an API call fails, the
     response includes whatever was created so far plus the error so you can
     clean up or continue deliberately.
@@ -45,7 +47,9 @@ async def build_campaign(
     maximize_conversions. It may include description, bidding_strategy,
     custom_audience_bid_multipliers, context_hints, and product_set. ads must be
     a list of objects accepted by create_ad: name, creative_type, title, body,
-    target_url, file_id, and optional price. budget_usd was renamed to
+    target_url, file_id or image_url (a public https image, uploaded only after
+    every body validates and before anything is created), and optional price.
+    budget_usd was renamed to
     lifetime_budget and is refused.
     """
     if renamed_err := _reject_renamed(budget_usd=budget_usd):
@@ -104,6 +108,9 @@ async def build_campaign(
     for index, ad in enumerate(ad_payloads):
         if not isinstance(ad, dict):
             return _bad_request(f"ads[{index}] must be an object.")
+        file_id, image_err = _image_source(ad.get("file_id"), ad.get("image_url"))
+        if image_err:
+            return _bad_request(f"ads[{index}]: {json.loads(image_err)['message']}")
         ad_body, ad_err = _build_ad_body(
             ad_group_id=_PENDING_ID,
             name=ad.get("name") or ad.get("title"),
@@ -111,19 +118,30 @@ async def build_campaign(
             title=ad.get("title"),
             body=ad.get("body"),
             target_url=ad.get("target_url"),
-            file_id=ad.get("file_id"),
+            file_id=file_id,
             price=ad.get("price"),
             status="paused",
             create=True,
         )
         if ad_err:
             return _bad_request(f"ads[{index}]: {json.loads(ad_err)['message']}")
+        # Children ready under a paused campaign (OpenAI accepts this; checked 2026-10-20): nothing
+        # serves until the campaign is activated, and that single step takes the tree live.
+        ad_body["status"] = "active"
         ad_bodies.append(ad_body)
+    ad_group_body["status"] = "active"
     client, client_err = _get_client_or_error()
     if client_err:
         return client_err
     created: dict[str, Any] = {"campaign": None, "ad_group": None, "ads": []}
     try:
+        # Images first: an upload that fails leaves nothing created.
+        for index, ad in enumerate(ad_payloads):
+            if ad.get("image_url"):
+                uploaded = await _upload_image_url(client, ad["image_url"])
+                if not uploaded:
+                    return _bad_request(f"ads[{index}]: the image upload returned no file_id; nothing was created.")
+                ad_bodies[index]["creative"]["file_id"] = uploaded
         campaign = await client.post(
             "/campaigns", json=campaign_body, idempotency_key=_child_idempotency_key(idempotency_key, "campaign")
         )
@@ -147,7 +165,7 @@ async def build_campaign(
             created["ads"].append(created_ad)
         return _ok({
             "created": created,
-            "note": "Created paused. To go live, call set_campaign_state/set_ad_group_state/set_ad_state with state='activate'.",
+            "note": "Campaign created paused; its ad group and ads are ready. To go live, activate the campaign with set_campaign_state state='activate'.",
         })
     except OpenAIAdsAPIError as e:
         if created["campaign"] or created["ad_group"] or created["ads"]:

@@ -211,6 +211,25 @@ async def upload_creative(
         return _err(e)
 
 
+_PENDING_FILE = "pending_upload"
+
+
+def _image_source(file_id: str | None, image_url: str | None) -> tuple[str | None, str | None]:
+    """The file_id to validate the creative with: the one given, or a placeholder the upload fills."""
+    if file_id and image_url:
+        return None, _bad_request("Pass file_id or image_url, not both.")
+    if image_url is None:
+        return file_id, None
+    if not isinstance(image_url, str) or not image_url.startswith("https://"):
+        return None, _bad_request("image_url must be a public https URL.")
+    return _PENDING_FILE, None
+
+
+async def _upload_image_url(client: OpenAIAdsClient, image_url: str) -> str | None:
+    """Upload an image by URL (OpenAI fetches it) and return its file_id."""
+    return _extract_id(await client.post("/upload", json={"image_url": image_url}), "file_id", "id")
+
+
 @ads_tool(writes=True, open_world=True)
 async def create_ad(
     ad_group_id: str,
@@ -223,16 +242,21 @@ async def create_ad(
     price: str | None = None,
     status: Literal["paused"] = "paused",
     idempotency_key: str | None = None,
+    image_url: str | None = None,
 ) -> str:
     """Create a paused ad.
 
-    chat_card creatives require target_url and file_id. product_ad_template
+    chat_card creatives require target_url and an image: file_id, or image_url (a public https
+    image, uploaded only after every other field passes validation). product_ad_template
     creatives use the same title/body fields and may include price.
     target_url must be on the ad account's own website domain until the
     account's verification is approved; the API otherwise rejects it with
     "Account verification must be approved before using a different ad URL".
     idempotency_key is optional; a fresh one is generated when omitted.
     """
+    file_id, image_err = _image_source(file_id, image_url)
+    if image_err:
+        return image_err
     payload, payload_err = _build_ad_body(
         ad_group_id=ad_group_id,
         name=name,
@@ -254,6 +278,11 @@ async def create_ad(
     if client_err:
         return client_err
     try:
+        if image_url:
+            uploaded = await _upload_image_url(client, image_url)
+            if not uploaded:
+                return _bad_request("The image upload returned no file_id; nothing was created.")
+            payload["creative"]["file_id"] = uploaded
         kwargs = {"json": payload}
         if idempotency_key:
             kwargs["idempotency_key"] = idempotency_key

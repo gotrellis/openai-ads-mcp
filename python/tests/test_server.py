@@ -793,7 +793,9 @@ class TestHelpers:
         data = json.loads(result)
         assert data["created"]["campaign"]["id"] == "camp_1"
         assert data["ad_ids"] if "ad_ids" in data else True
-        assert "Created paused" in data["note"]
+        assert "created paused" in data["note"]
+        bodies = [call.kwargs["json"] for call in mock_client.post.call_args_list]
+        assert [b["status"] for b in bodies] == ["paused", "active", "active", "active"]
         assert [call.args[0] for call in mock_client.post.call_args_list] == ["/campaigns", "/ad_groups", "/ads", "/ads"]
         assert [call.kwargs.get("idempotency_key") for call in mock_client.post.call_args_list] == [
             "tree-1:campaign",
@@ -801,6 +803,92 @@ class TestHelpers:
             "tree-1:ad_0",
             "tree-1:ad_1",
         ]
+
+    @pytest.mark.asyncio
+    async def test_build_campaign_uploads_image_urls_before_creating(self, mock_client):
+        from openai_ads_mcp.helpers import build_campaign
+
+        mock_client.post = AsyncMock(side_effect=[
+            {"file_id": "file_up"},
+            {"id": "camp_1"},
+            {"id": "ag_1"},
+            {"id": "ad_1"},
+        ])
+        data = json.loads(await build_campaign(
+            name="Image test",
+            lifetime_budget=50,
+            ad_group={"name": "Buyers", "billing_event": "click", "max_bid": 1.5},
+            ads=[{
+                "name": "Variant A",
+                "creative_type": "chat_card",
+                "title": "Find your AI gaps",
+                "body": "Track your brand in AI answers.",
+                "target_url": "https://trakkr.ai",
+                "image_url": "https://cdn.example.com/a.png",
+            }],
+        ))
+        calls = mock_client.post.call_args_list
+        assert [c.args[0] for c in calls] == ["/upload", "/campaigns", "/ad_groups", "/ads"]
+        assert calls[0].kwargs["json"] == {"image_url": "https://cdn.example.com/a.png"}
+        assert calls[3].kwargs["json"]["creative"]["file_id"] == "file_up"
+        assert data["created"]["ads"][0]["id"] == "ad_1"
+
+    @pytest.mark.asyncio
+    async def test_build_campaign_failed_upload_creates_nothing(self, mock_client):
+        from openai_ads_mcp.helpers import build_campaign
+        from openai_ads_mcp.client import OpenAIAdsAPIError
+
+        mock_client.post = AsyncMock(side_effect=OpenAIAdsAPIError(400, "could not fetch image"))
+        ad = {
+            "name": "Variant A",
+            "creative_type": "chat_card",
+            "title": "Find your AI gaps",
+            "body": "Track your brand in AI answers.",
+            "target_url": "https://trakkr.ai",
+            "image_url": "https://cdn.example.com/missing.png",
+        }
+        data = json.loads(await build_campaign(
+            name="Image test", lifetime_budget=50,
+            ad_group={"name": "Buyers", "billing_event": "click", "max_bid": 1.5}, ads=[ad],
+        ))
+        assert data["error"] is True
+        assert [c.args[0] for c in mock_client.post.call_args_list] == ["/upload"]
+
+    @pytest.mark.asyncio
+    async def test_image_url_is_refused_with_file_id_or_without_https(self, mock_client):
+        from openai_ads_mcp.helpers import build_campaign
+        from openai_ads_mcp.tools_ads import create_ad
+
+        base = {
+            "name": "Variant A",
+            "creative_type": "chat_card",
+            "title": "Find your AI gaps",
+            "body": "Track your brand in AI answers.",
+            "target_url": "https://trakkr.ai",
+        }
+        both = json.loads(await build_campaign(
+            name="Image test", lifetime_budget=50, ad_group={"name": "Buyers", "billing_event": "click", "max_bid": 1.5},
+            ads=[{**base, "file_id": "f", "image_url": "https://cdn.example.com/a.png"}],
+        ))
+        assert both["error"] is True and "not both" in both["message"]
+        plain = json.loads(await create_ad(ad_group_id="ag_1", image_url="http://cdn.example.com/a.png", **base))
+        assert plain["error"] is True and "https" in plain["message"]
+        mock_client.post.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_create_ad_uploads_then_creates_paused(self, mock_client):
+        from openai_ads_mcp.tools_ads import create_ad
+
+        mock_client.post = AsyncMock(side_effect=[{"file_id": "file_up"}, {"id": "ad_1", "status": "paused"}])
+        await create_ad(
+            ad_group_id="ag_1", name="Variant A", creative_type="chat_card", title="Find your AI gaps",
+            body="Track your brand in AI answers.", target_url="https://trakkr.ai",
+            image_url="https://cdn.example.com/a.png",
+        )
+        upload, ad = mock_client.post.call_args_list
+        assert upload.args[0] == "/upload"
+        assert ad.kwargs["json"]["creative"]["file_id"] == "file_up"
+        assert ad.kwargs["json"]["status"] == "paused"
 
     @pytest.mark.asyncio
     async def test_build_campaign_product_feed_uses_product_set(self, mock_client):
