@@ -951,6 +951,70 @@ class TestHelpers:
         assert mock_client.post.call_args_list[1].kwargs["json"]["product_set"]["product_feed_id"] == "product_feed_123"
 
     @pytest.mark.asyncio
+    async def test_build_campaign_sends_schedule_and_targeting(self, mock_client):
+        from openai_ads_mcp.helpers import build_campaign
+
+        mock_client.post = AsyncMock(side_effect=[
+            {"id": "camp_1", "status": "paused"},
+            {"id": "ag_1", "status": "paused"},
+            {"id": "ad_1", "status": "paused"},
+        ])
+        await build_campaign(
+            name="Targeted",
+            lifetime_budget=50,
+            start_time=1893456000,
+            end_time=1894060800,
+            locations=[{"id": "1000232", "name": "United States"}],
+            excluded_locations=["2000001"],
+            custom_audience_ids=["aud_1"],
+            excluded_custom_audience_ids=["aud_2"],
+            platforms=["ios_app", "web"],
+            ad_group={"name": "Buyers", "billing_event": "click", "bidding_strategy": "maximize_clicks"},
+            ads=[{
+                "name": "Card",
+                "creative_type": "chat_card",
+                "title": "Title",
+                "body": "Body",
+                "target_url": "https://trakkr.ai",
+                "file_id": "file_1",
+            }],
+        )
+
+        campaign = mock_client.post.call_args_list[0].kwargs["json"]
+        assert campaign["start_time"] == 1893456000
+        assert campaign["end_time"] == 1894060800
+        assert campaign["targeting"] == {
+            "locations": {"include": [{"id": "1000232", "name": "United States"}]},
+            "excluded_locations": {"include": [{"id": "2000001"}]},
+            "custom_audiences": {"ids": ["aud_1"]},
+            "excluded_custom_audiences": {"ids": ["aud_2"]},
+            "platforms": {"included": ["ios_app", "web"]},
+        }
+
+    @pytest.mark.asyncio
+    async def test_build_campaign_refuses_bad_targeting_before_posting(self, mock_client):
+        from openai_ads_mcp.helpers import build_campaign
+
+        data = json.loads(await build_campaign(
+            name="Targeted",
+            lifetime_budget=50,
+            platforms=["smart_fridge"],
+            ad_group={"name": "Buyers", "billing_event": "click", "bidding_strategy": "maximize_clicks"},
+            ads=[{
+                "name": "Card",
+                "creative_type": "chat_card",
+                "title": "Title",
+                "body": "Body",
+                "target_url": "https://trakkr.ai",
+                "file_id": "file_1",
+            }],
+        ))
+
+        assert data["error"] is True
+        assert "smart_fridge" in data["message"]
+        mock_client.post.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_build_conversion_campaign_requires_click_billing(self, mock_client):
         from openai_ads_mcp.helpers import build_campaign
 

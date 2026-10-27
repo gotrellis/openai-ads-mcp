@@ -21,6 +21,13 @@ async def build_campaign(
     description: str | None = None,
     bidding_type: Literal["impressions", "clicks", "conversions"] | None = None,
     conversion_event_setting_id: str | None = None,
+    start_time: int | None = None,
+    end_time: int | None = None,
+    locations: Any = None,
+    excluded_locations: Any = None,
+    custom_audience_ids: Any = None,
+    excluded_custom_audience_ids: Any = None,
+    platforms: Any = None,
     confirm_budget: bool = False,
     confirm_bid: bool = False,
     idempotency_key: str | None = None,
@@ -40,6 +47,13 @@ async def build_campaign(
     get_account to see the currency). A lifetime_budget above
     OPENAI_ADS_BUDGET_CEILING, or any daily_budget (it has no end_time here),
     needs confirm_budget=True. description is the campaign's.
+
+    start_time, end_time, locations, excluded_locations, custom_audience_ids,
+    excluded_custom_audience_ids and platforms are the campaign's, exactly as
+    create_campaign takes them: Unix timestamps, geo ids or objects from
+    search_geo, audience ids, and ios_app / android_app / web / desktop_web /
+    ios_web / android_web. A campaign created without locations has no geo
+    targeting at all, so pass them.
 
     ad_group must be an object with name and billing_event, plus max_bid
     (account currency, major units; above OPENAI_ADS_BID_CEILING needs
@@ -83,6 +97,13 @@ async def build_campaign(
         mode="product_feed" if has_product_set else None,
         bidding_type=bidding_type,
         conversion_event_setting_ids=[conversion_event_setting_id] if conversion_event_setting_id else None,
+        start_time=start_time,
+        end_time=end_time,
+        locations=locations,
+        excluded_locations=excluded_locations,
+        custom_audience_ids=custom_audience_ids,
+        excluded_custom_audience_ids=excluded_custom_audience_ids,
+        platforms=platforms,
         confirm_budget=confirm_budget,
         create=True,
     )
