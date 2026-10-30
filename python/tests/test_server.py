@@ -643,6 +643,21 @@ class TestWriteTools:
         mock_client.post.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_create_feed_campaign_needs_feed_id(self, mock_client):
+        from openai_ads_mcp.tools_campaigns import create_campaign
+
+        data = json.loads(await create_campaign(name="Feed test", lifetime_budget=25, mode="product_feed"))
+        assert data["error"] is True
+        data = json.loads(await create_campaign(name="Feed test", lifetime_budget=25, product_feed_id="feed_1"))
+        assert data["error"] is True
+        mock_client.post.assert_not_called()
+
+        await create_campaign(name="Feed test", lifetime_budget=25, mode="product_feed", product_feed_id="feed_1")
+        payload = mock_client.post.call_args.kwargs["json"]
+        assert payload["mode"] == "product_feed"
+        assert payload["product_feed_id"] == "feed_1"
+
+    @pytest.mark.asyncio
     async def test_set_state_tools(self, mock_client):
         from openai_ads_mcp.tools_adgroups import set_ad_group_state
         from openai_ads_mcp.tools_ads import set_ad_state
@@ -947,8 +962,45 @@ class TestHelpers:
             }],
         ))
         assert data["created"]["campaign"]["id"] == "camp_1"
-        assert mock_client.post.call_args_list[0].kwargs["json"]["mode"] == "product_feed"
+        campaign_body = mock_client.post.call_args_list[0].kwargs["json"]
+        assert campaign_body["mode"] == "product_feed"
+        assert campaign_body["product_feed_id"] == "product_feed_123"
         assert mock_client.post.call_args_list[1].kwargs["json"]["product_set"]["product_feed_id"] == "product_feed_123"
+
+    @pytest.mark.asyncio
+    async def test_build_conversion_campaign_on_product_feed(self, mock_client):
+        from openai_ads_mcp.helpers import build_campaign
+
+        mock_client.post = AsyncMock(side_effect=[
+            {"id": "camp_1", "status": "paused"},
+            {"id": "ag_1", "status": "paused"},
+            {"id": "ad_1", "status": "paused"},
+        ])
+        data = json.loads(await build_campaign(
+            name="Feed conversions",
+            daily_budget=25,
+            confirm_budget=True,
+            bidding_type="conversions",
+            conversion_event_setting_id="ces_1",
+            ad_group={
+                "name": "Feed buyers",
+                "billing_event": "click",
+                "bidding_strategy": "maximize_conversions",
+                "product_set": {"product_feed_id": "product_feed_123"},
+            },
+            ads=[{
+                "name": "Template A",
+                "creative_type": "product_ad_template",
+                "title": "Washable rugs",
+                "body": "Rugs for kids and pets.",
+            }],
+        ))
+        assert data["created"]["campaign"]["id"] == "camp_1"
+        campaign_body = mock_client.post.call_args_list[0].kwargs["json"]
+        assert campaign_body["mode"] == "product_feed"
+        assert campaign_body["product_feed_id"] == "product_feed_123"
+        assert campaign_body["bidding_type"] == "conversions"
+        assert campaign_body["conversion_event_setting_ids"] == ["ces_1"]
 
     @pytest.mark.asyncio
     async def test_build_conversion_campaign_requires_click_billing(self, mock_client):
