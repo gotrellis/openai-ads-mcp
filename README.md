@@ -250,7 +250,7 @@ The production runbook is in `HOSTED_DEPLOY.md`.
 
 ## Tool Surface
 
-The upstream manifest lists 27 tools. This fork's Python runtime adds `get_conversions`, `set_ad_account_state`, `update_ad_account_brand`, the daily spend limit tools (`get_spend_limits`, `set_daily_spend_limit`, `remove_daily_spend_limit`), and `update_product_feed_products` (34 listed by default, 35 with `OPENAI_ADS_ENABLE_FEED_WRITES=1`; 15 in readonly mode).
+The upstream manifest lists 27 tools. This fork's Python runtime adds `get_conversions`, `set_ad_account_state`, `update_ad_account_brand`, the daily spend limit tools (`get_spend_limits`, `set_daily_spend_limit`, `remove_daily_spend_limit`), the product feed read tools (`list_product_feeds`, `list_product_feed_uploads`, `query_product_feed_products`, `get_product_feed_settings`), and `update_product_feed_products` (38 listed by default, 39 with `OPENAI_ADS_ENABLE_FEED_WRITES=1`; 19 in readonly mode).
 
 | Group | Tools |
 | --- | --- |
@@ -261,6 +261,7 @@ The upstream manifest lists 27 tools. This fork's Python runtime adds `get_conve
 | Insights | `get_insights` |
 | Audiences | `list_audiences`, `get_audience`, `search_geo`, `manage_audience` |
 | Conversions | `get_conversions` (read), `manage_conversions`, `send_conversions` |
+| Product feeds | `list_product_feeds`, `list_product_feed_uploads`, `query_product_feed_products`, `get_product_feed_settings` (all read), `update_product_feed_products` (opt-in write) |
 | Helpers | `build_campaign`, `draft_context_hints`, `bulk_ab_test_hints` |
 
 ### High-use tools
