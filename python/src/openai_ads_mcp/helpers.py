@@ -68,7 +68,9 @@ async def build_campaign(
     idempotency_key, idempotency_err = _validate_idempotency_key(idempotency_key)
     if idempotency_err:
         return idempotency_err
-    has_product_set = group_payload.get("product_set") is not None
+    product_set = group_payload.get("product_set")
+    # A feed campaign names its feed itself; the ad group's product_set reuses that id.
+    product_feed_id = product_set.get("product_feed_id") if isinstance(product_set, dict) else None
     if bidding_type == "conversions" and group_payload.get("billing_event") != "click":
         return _bad_request(
             "Conversion-optimized campaign ad groups must use billing_event='click'. "
@@ -80,7 +82,8 @@ async def build_campaign(
         daily_budget=daily_budget,
         description=description,
         status="paused",
-        mode="product_feed" if has_product_set else None,
+        mode="product_feed" if product_set is not None else None,
+        product_feed_id=product_feed_id,
         bidding_type=bidding_type,
         conversion_event_setting_ids=[conversion_event_setting_id] if conversion_event_setting_id else None,
         confirm_budget=confirm_budget,

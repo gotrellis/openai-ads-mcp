@@ -32,7 +32,15 @@ FORK_WRITE_TOOLS = {
 # Listed only with OPENAI_ADS_ENABLE_FEED_WRITES=1 (price unit unverified).
 FEED_WRITE_TOOLS = {"update_product_feed_products"}
 # Fork read tools: get_conversions is the read half split out of the upstream manage_conversions.
-FORK_READ_TOOLS = {"get_conversions", "get_ad_preview", "get_spend_limits"}
+FORK_READ_TOOLS = {
+    "get_conversions",
+    "get_ad_preview",
+    "get_spend_limits",
+    "list_product_feeds",
+    "list_product_feed_uploads",
+    "query_product_feed_products",
+    "get_product_feed_settings",
+}
 EXPECTED_TOOLS = EXPECTED_TOOLS + sorted(FORK_WRITE_TOOLS | FORK_READ_TOOLS)
 
 EXPECTED_WRITE_TOOLS = {
@@ -125,6 +133,10 @@ USED_OPENAI_ADS_PATHS = {
     "/custom_audiences",
     "/custom_audiences/{custom_audience_id}",
     "/uploads",
+    "/feeds",
+    "/feeds/uploads",
+    "/feeds/{feed_id}/products/query",
+    "/feeds/{feed_id}/settings",
     "/feeds/{feed_id}/products",
     "/custom_audiences/{custom_audience_id}/archive",
     "/conversions/pixels",
@@ -162,7 +174,7 @@ class TestToolRegistration:
         assert registered == expected
 
     def test_tool_count_is_curated(self):
-        assert len(self._tools()) == 34
+        assert len(self._tools()) == 38
 
     def test_all_tools_have_descriptions_and_annotations(self):
         for name, tool in self._tools().items():
@@ -234,7 +246,7 @@ class TestToolRegistration:
         assert "manage_conversions" not in names
         assert not (names & EXPECTED_WRITE_TOOLS)
         assert "get_ad_preview" in names
-        assert len(names) == 15
+        assert len(names) == 19
 
     def test_preview_listed_in_readonly(self):
         assert "get_ad_preview" in self._tools_in_subprocess(OPENAI_ADS_MCP_READONLY="1")
@@ -643,6 +655,21 @@ class TestWriteTools:
         mock_client.post.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_create_feed_campaign_needs_feed_id(self, mock_client):
+        from openai_ads_mcp.tools_campaigns import create_campaign
+
+        data = json.loads(await create_campaign(name="Feed test", lifetime_budget=25, mode="product_feed"))
+        assert data["error"] is True
+        data = json.loads(await create_campaign(name="Feed test", lifetime_budget=25, product_feed_id="feed_1"))
+        assert data["error"] is True
+        mock_client.post.assert_not_called()
+
+        await create_campaign(name="Feed test", lifetime_budget=25, mode="product_feed", product_feed_id="feed_1")
+        payload = mock_client.post.call_args.kwargs["json"]
+        assert payload["mode"] == "product_feed"
+        assert payload["product_feed_id"] == "feed_1"
+
+    @pytest.mark.asyncio
     async def test_set_state_tools(self, mock_client):
         from openai_ads_mcp.tools_adgroups import set_ad_group_state
         from openai_ads_mcp.tools_ads import set_ad_state
@@ -947,8 +974,45 @@ class TestHelpers:
             }],
         ))
         assert data["created"]["campaign"]["id"] == "camp_1"
-        assert mock_client.post.call_args_list[0].kwargs["json"]["mode"] == "product_feed"
+        campaign_body = mock_client.post.call_args_list[0].kwargs["json"]
+        assert campaign_body["mode"] == "product_feed"
+        assert campaign_body["product_feed_id"] == "product_feed_123"
         assert mock_client.post.call_args_list[1].kwargs["json"]["product_set"]["product_feed_id"] == "product_feed_123"
+
+    @pytest.mark.asyncio
+    async def test_build_conversion_campaign_on_product_feed(self, mock_client):
+        from openai_ads_mcp.helpers import build_campaign
+
+        mock_client.post = AsyncMock(side_effect=[
+            {"id": "camp_1", "status": "paused"},
+            {"id": "ag_1", "status": "paused"},
+            {"id": "ad_1", "status": "paused"},
+        ])
+        data = json.loads(await build_campaign(
+            name="Feed conversions",
+            daily_budget=25,
+            confirm_budget=True,
+            bidding_type="conversions",
+            conversion_event_setting_id="ces_1",
+            ad_group={
+                "name": "Feed buyers",
+                "billing_event": "click",
+                "bidding_strategy": "maximize_conversions",
+                "product_set": {"product_feed_id": "product_feed_123"},
+            },
+            ads=[{
+                "name": "Template A",
+                "creative_type": "product_ad_template",
+                "title": "Washable rugs",
+                "body": "Rugs for kids and pets.",
+            }],
+        ))
+        assert data["created"]["campaign"]["id"] == "camp_1"
+        campaign_body = mock_client.post.call_args_list[0].kwargs["json"]
+        assert campaign_body["mode"] == "product_feed"
+        assert campaign_body["product_feed_id"] == "product_feed_123"
+        assert campaign_body["bidding_type"] == "conversions"
+        assert campaign_body["conversion_event_setting_ids"] == ["ces_1"]
 
     @pytest.mark.asyncio
     async def test_build_conversion_campaign_requires_click_billing(self, mock_client):
@@ -1658,6 +1722,77 @@ class TestClientMultipart:
 
 
 class TestProductFeeds:
+    @pytest.mark.asyncio
+    async def test_list_product_feeds(self, mock_client):
+        from openai_ads_mcp.tools_feeds import list_product_feeds
+
+        await list_product_feeds()
+        mock_client.get.assert_called_once_with("/feeds", params={"include": ["product_count"], "limit": 20})
+        mock_client.get.reset_mock()
+        await list_product_feeds(include_product_count=False, limit=5, after="feed_9")
+        mock_client.get.assert_called_once_with("/feeds", params={"limit": 5, "after": "feed_9"})
+        assert json.loads(await list_product_feeds(limit=501))["error"] is True
+
+    @pytest.mark.asyncio
+    async def test_list_product_feeds_sends_bracketed_include(self):
+        async def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.params.get_list("include[]") == ["product_count"]
+            return httpx.Response(200, json={"object": "list", "data": []}, request=request)
+
+        client = OpenAIAdsClient("test", base_url="https://ads.test/v1")
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(base_url="https://ads.test/v1/", transport=httpx.MockTransport(handler))
+        try:
+            await client.get("/feeds", params={"include": ["product_count"], "limit": 20})
+        finally:
+            await client.close()
+
+    @pytest.mark.asyncio
+    async def test_list_product_feed_uploads(self, mock_client):
+        from openai_ads_mcp.tools_feeds import list_product_feed_uploads
+
+        await list_product_feed_uploads(limit=50)
+        mock_client.get.assert_called_once_with("/feeds/uploads", params={"paginate": True, "limit": 50})
+        assert json.loads(await list_product_feed_uploads(limit=101))["error"] is True
+
+    @pytest.mark.asyncio
+    async def test_query_product_feed_products(self, mock_client):
+        from openai_ads_mcp.tools_feeds import query_product_feed_products
+
+        await query_product_feed_products(" feed_1 ")
+        mock_client.post.assert_called_once_with("/feeds/feed_1/products/query", json={"limit": 20})
+        mock_client.post.reset_mock()
+        filters = [{"field": "brand", "operator": "not_in", "values": ["Acme"]}]
+        await query_product_feed_products("feed_1", filters=json.dumps(filters), limit=100, after="prod_9")
+        mock_client.post.assert_called_once_with(
+            "/feeds/feed_1/products/query", json={"filters": filters, "limit": 100, "after": "prod_9"}
+        )
+
+    @pytest.mark.asyncio
+    async def test_query_product_feed_products_validation(self, mock_client):
+        from openai_ads_mcp.tools_feeds import query_product_feed_products
+
+        for kwargs in (
+            {"feed_id": ""},
+            {"feed_id": "feed_1", "limit": 0},
+            {"feed_id": "feed_1", "filters": ["brand"]},
+            {"feed_id": "feed_1", "filters": [{"operator": "in", "values": ["a"]}]},
+            {"feed_id": "feed_1", "filters": [{"field": "brand", "operator": "like", "values": ["a"]}]},
+            {"feed_id": "feed_1", "filters": [{"field": "brand", "operator": "in", "values": []}]},
+            {"feed_id": "feed_1", "filters": [{"field": "brand", "operator": "in"}]},
+        ):
+            data = json.loads(await query_product_feed_products(**kwargs))
+            assert data["error"] is True, kwargs
+        mock_client.post.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_get_product_feed_settings(self, mock_client):
+        from openai_ads_mcp.tools_feeds import get_product_feed_settings
+
+        await get_product_feed_settings("feed_1")
+        mock_client.get.assert_called_once_with("/feeds/feed_1/settings")
+        assert json.loads(await get_product_feed_settings(" "))["error"] is True
+
     @pytest.mark.asyncio
     async def test_update_product_feed_products(self, mock_client):
         from openai_ads_mcp.tools_feeds import update_product_feed_products

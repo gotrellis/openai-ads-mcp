@@ -84,6 +84,7 @@ def _build_campaign_body(
     start_time: int | None = None,
     end_time: int | None = None,
     mode: str | None = None,
+    product_feed_id: str | None = None,
     bidding_type: str | None = None,
     conversion_event_setting_ids: Any = None,
     locations: Any = None,
@@ -146,7 +147,12 @@ def _build_campaign_body(
             return None, _bad_request("mode cannot be changed after campaign creation.")
         if mode != "product_feed":
             return None, _bad_request("mode must be product_feed when provided.")
+        if not isinstance(product_feed_id, str) or not product_feed_id.strip():
+            return None, _bad_request("mode='product_feed' requires product_feed_id, a feed linked to the ad account.")
         body["mode"] = mode
+        body["product_feed_id"] = product_feed_id.strip()
+    elif product_feed_id is not None:
+        return None, _bad_request("product_feed_id requires mode='product_feed'.")
     if bidding_type is not None:
         if not create:
             return None, _bad_request("bidding_type cannot be changed after campaign creation.")
@@ -164,8 +170,6 @@ def _build_campaign_body(
             return None, _bad_request("conversion_event_setting_ids must contain exactly one event setting id.")
         body["conversion_event_setting_ids"] = conversion_ids
     if create and bidding_type == "conversions":
-        if mode == "product_feed":
-            return None, _bad_request("Conversion-optimized campaigns cannot use product_feed mode.")
         if conversion_ids is None:
             return None, _bad_request("bidding_type='conversions' requires exactly one conversion_event_setting_ids value.")
     elif create and conversion_ids is not None:
@@ -237,6 +241,7 @@ async def create_campaign(
     start_time: int | None = None,
     end_time: int | None = None,
     mode: Literal["product_feed"] | None = None,
+    product_feed_id: str | None = None,
     bidding_type: Literal["impressions", "clicks", "conversions"] | None = None,
     conversion_event_setting_ids: Any = None,
     locations: Any = None,
@@ -263,7 +268,9 @@ async def create_campaign(
         description: Optional internal campaign description.
         start_time: Optional Unix timestamp, 2000-01-01 to 2100-01-01.
         end_time: Optional Unix timestamp, 2000-01-01 to 2100-01-01.
-        mode: Optional. Only product_feed is supported.
+        mode: Optional. Only product_feed is supported, and it needs product_feed_id.
+        product_feed_id: The product feed linked to the ad account; required with mode='product_feed'.
+            Conversion bidding works on feed campaigns too.
         bidding_type: impressions, clicks, or conversions. Conversion optimization requires one event setting id.
         conversion_event_setting_ids: Exactly one active standard conversion event for conversion optimization.
         locations: Optional geo target ids or objects for targeting.locations.include (see search_geo).
@@ -287,6 +294,7 @@ async def create_campaign(
         start_time=start_time,
         end_time=end_time,
         mode=mode,
+        product_feed_id=product_feed_id,
         bidding_type=bidding_type,
         conversion_event_setting_ids=conversion_event_setting_ids,
         locations=locations,
